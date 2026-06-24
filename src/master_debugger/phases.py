@@ -67,8 +67,8 @@ class Phase1RuntimeDebug:
     @staticmethod
     def run(code: str) -> RuntimeDebugResult:
         """Run runtime debugging on code"""
-        from ..python_debug import execute_with_debug
-        from ..python_debug.bug_patterns import BugPatternDetector
+        from verification_debugging_suite.python_debug import execute_with_debug
+        from verification_debugging_suite.python_debug.bug_patterns import BugPatternDetector
         
         result = RuntimeDebugResult()
         
@@ -101,7 +101,7 @@ class Phase2FormalVerification:
         
         try:
             # Try to import and use pyprover Phase 2 if available
-            from ..pyprover import verify_contract
+            from verification_debugging_suite.pyprover import verify_contract
             
             # Attempt verification
             verification = verify_contract(code, language="python")
@@ -124,7 +124,7 @@ class Phase3DesignReview:
     @staticmethod
     def run(code: str) -> DesignReviewResult:
         """Run design review on code"""
-        from ..troubleshooting import Troubleshooter
+        from verification_debugging_suite.troubleshooting import Troubleshooter
         
         result = DesignReviewResult()
         

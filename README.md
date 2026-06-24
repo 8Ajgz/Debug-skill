@@ -1,49 +1,70 @@
-# Debug Suite v1.2
+# Verification-Debugging-Suite v1.0
 
-Production-ready unified debugging and verification suite combining 8 complementary tools for Python and JavaScript: python-debug, javascript-debug, pyprover, test-generator, code-orchestrator, troubleshooting, master-debugger-v5, and common utilities with unified interoperability layer.
-
-## Quick Start
-
-```python
-from debug_suite import MasterDebuggerV5, LanguageDetector
-
-debugger = MasterDebuggerV5()
-
-# Automatically detects Python or JavaScript
-py_code = "def divide(a, b):\n    return a / b"
-js_code = "let x = null; console.log(x.foo);"
-
-py_report = debugger.debug(py_code)
-js_report = debugger.debug(js_code)
-
-print(py_report.summary)  # Risk level, phases executed, issues found
-print(js_report.summary)
-```
+Production-ready unified verification and debugging suite combining 7 complementary tools.
 
 ## Features
 
-**4-Phase Automated Debugging** | **Python & JavaScript Support** | **Formal Verification** | **Comprehensive Testing** | **Codebase Analysis** | **Problem Diagnosis** | **Unified Interoperability**
+- **4-Phase Automated Debugging** (Master-Debugger-v5)
+  - Phase 0: Static analysis (mypy, pylint, bandit)
+  - Phase 1: Runtime tracing (python-debug)
+  - Phase 2: Formal verification (pyprover + Z3)
+  - Phase 3: Design review (troubleshooting)
 
-For detailed feature descriptions, see **SKILL.md**.
+- **Formal Contract Verification** (PyProver v14.0)
+  - Z3 SMT solver integration
+  - Loop invariant verification
+  - Property-based testing
+
+- **Comprehensive Test Generation** (test-generator v1.1)
+  - Edge cases and boundary values
+  - Mutation testing
+  - Metamorphic tests
+  - Red-team adversarial tests
+
+- **Large-Scale Analysis** (code-orchestrator v1.1)
+  - Multi-function codebase verification
+  - GitHub project analysis
+  - Progress checkpointing
+
+- **Universal Troubleshooting** (troubleshooting v1.0)
+  - 5-phase diagnosis methodology
+  - Problem classification
+  - Root cause analysis
+  - Solution recommendation
 
 ## Installation
 
 ```bash
-pip install debug-suite
+pip install verification-debugging-suite
 ```
 
-Or from local file:
-```bash
-pip install /path/to/debug-suite-1.2.skill
+## Quick Start
+
+```python
+from verification_debugging_suite import MasterDebuggerV5
+
+debugger = MasterDebuggerV5()
+code = """
+def divide(a, b):
+    return a / b
+"""
+
+report = debugger.debug(code)
+print(report.summary)
 ```
+
+## Components
+
+- `python-debug` - Runtime execution tracing (v12.3)
+- `pyprover` - Formal verification with Z3 (v14.0)
+- `test-generator` - Test generation and mutation (v1.1)
+- `code-orchestrator` - Codebase analysis (v1.1)
+- `troubleshooting` - 5-phase diagnosis (v1.0)
+- `master-debugger-v5` - 4-phase orchestrator (v5.0)
 
 ## Documentation
 
-- **[SKILL.md](SKILL.md)** – Complete API reference, use cases, workflows, token costs
-- **[API.md](API.md)** – Auto-generated operation signatures and schemas
-- **[INTEROP.yaml](INTEROP.yaml)** – Interoperability metadata and operation contracts
-- **[CHANGELOG.md](CHANGELOG.md)** – Version history and breaking changes
-- **[src/common/interop.py](src/common/interop.py)** – Unified interop layer documentation
+See `SKILL.md` for complete API reference and examples.
 
 ## License
 
