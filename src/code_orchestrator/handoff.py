@@ -7,14 +7,13 @@ from typing import Optional, Tuple
 from .type_stubs import (
     CodeStructure,
     DecompositionPlan,
-    FunctionResult,
     Function,
     OperationError,
     OperationErrorType,
-    VerificationPhaseStatus,
     VerificationPhase,
     VerificationState,
 )
+from .types import FunctionResult, VerificationPhaseStatus
 
 
 class VerificationStateIO:

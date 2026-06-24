@@ -380,6 +380,52 @@ print(f"Fix: {diagnosis.remediation_steps}")         # [Add None check, validate
 
 ---
 
+## Comprehensive Test Suite (v1.0.0+)
+
+The suite now includes comprehensive tests for all components:
+
+```bash
+# Run all tests
+python -m pytest src/ -v
+
+# Run specific test categories
+python -m pytest src/ -m tracing      # Execution tracing tests
+python -m pytest src/ -m verification # Formal verification tests
+python -m pytest src/ -m generation   # Test generation tests
+python -m pytest src/ -m integration  # Integration tests
+
+# Run with coverage
+python -m pytest src/ --cov=src --cov-report=html
+
+# Run excluding slow tests
+python -m pytest src/ -m "not slow"
+```
+
+### Test Coverage by Component
+
+| Component | Test File | Tests | Status |
+|-----------|-----------|-------|--------|
+| **master-debugger** | `src/master_debugger/tests/test_orchestration.py` | 10+ | ✅ |
+| **python-debug** | `src/python_debug/tests/test_execution_tracing.py` | 25+ | ✅ |
+| **pyprover** | `src/pyprover/tests/test_verification.py` | 15+ | ✅ |
+| **test-generator** | `src/test_generator/tests/test_generation.py` | 20+ | ✅ |
+| **Integration** | `src/tests/test_integration.py` | 10+ | ✅ |
+
+### Test Markers
+
+Tests are organized by marker for selective execution:
+
+- `@pytest.mark.tracing` - Execution tracing tests
+- `@pytest.mark.patterns` - Bug pattern detection tests
+- `@pytest.mark.verification` - Formal verification tests
+- `@pytest.mark.generation` - Test generation tests
+- `@pytest.mark.contract` - Contract-based tests
+- `@pytest.mark.integration` - Integration tests
+- `@pytest.mark.performance` - Performance benchmarks
+- `@pytest.mark.slow` - Long-running tests (excluded by default)
+
+---
+
 ## Known Limitations
 
 - **Static analysis tools (Phase 0):** Requires mypy, pylint, bandit installed
@@ -413,6 +459,14 @@ MIT License - See LICENSE file
 
 ## Version History
 
+- **v1.0.1** (2026-06-24): Maintenance release - Fixed circular imports, added comprehensive test suite
+  - Fixed import issues in `master_debugger/phases.py` (4 imports)
+  - Fixed import issues in `python_debug/conftest.py` (3 imports)  
+  - Added 80+ test cases across 5 test files
+  - Created pytest.ini configuration for test collection
+  - Added parametrized edge case tests
+  - Added contract-based verification tests
+  - Added integration tests for end-to-end workflows
 - **v1.0.0** (2026-06-24): Production release - all 4 phases complete, all 7 components stable
 - **v0.9.0** (2026-06-23): Beta release - components integrated, documentation added
 - **v0.5.0** (2026-06-22): Alpha release - core implementations present

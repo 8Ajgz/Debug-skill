@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.0.1] - 2026-06-24
+
+### Fixed
+- **CRITICAL: Fixed circular import issue in master_debugger/phases.py**
+  - Lines 70, 71, 104, 127: Converted absolute imports to relative imports
+  - Enables Phase 1 (RuntimeDebug), Phase 2 (FormalVerification), Phase 3 (DesignReview)
+  - Impact: Master-debugger-v5 orchestrator now fully functional
+
+- **CRITICAL: Fixed import errors in python_debug/conftest.py**
+  - Lines 19, 111, 268: Converted absolute imports to relative imports
+  - Enables pytest collection and test fixture loading
+  - Impact: pytest now discovers and runs 80+ tests
+
+### Added
+- **Comprehensive Test Suite (80+ tests)**
+  - `src/master_debugger/tests/test_orchestration.py` (10+ tests)
+  - `src/python_debug/tests/test_execution_tracing.py` (25+ tests)
+  - `src/pyprover/tests/test_verification.py` (15+ tests)
+  - `src/test_generator/tests/test_generation.py` (20+ tests)
+  - `src/tests/test_integration.py` (10+ tests)
+
+- **Test Infrastructure**
+  - pytest.ini configuration with custom markers
+  - Parametrized edge case testing
+  - Contract-based formal verification tests
+  - Integration tests for end-to-end workflows
+
+- **Documentation Updates**
+  - Updated SKILL.md with test suite section
+  - Test running instructions and examples
+  - Test coverage matrix by component
+  - Test marker reference guide
+
 ## [1.0.0] - 2026-06-24
 
 ### Added

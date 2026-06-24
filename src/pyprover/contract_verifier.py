@@ -3,6 +3,13 @@ import re
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
+# Z3 import with graceful fallback
+try:
+    from z3 import Context
+    Z3_AVAILABLE = True
+except ImportError:
+    Z3_AVAILABLE = False
+
 @dataclass
 class ContractSpec:
     preconditions: List[str]
@@ -61,7 +68,8 @@ class ContractVerifier:
         
         try:
             # Attempt Z3 verification
-            from z3 import *
+            if not Z3_AVAILABLE:
+                raise ImportError("z3-solver not installed; install with: pip install z3-solver")
             
             # Create Z3 context
             ctx = Context()
@@ -78,10 +86,10 @@ class ContractVerifier:
                 result["verified"] = True
                 result["details"].append("No contracts to verify")
         
-        except ImportError:
+        except ImportError as ie:
             # Z3 not installed
             result["verified"] = False
-            result["details"].append("Z3 solver not available")
+            result["details"].append(f"Z3 solver not available: {str(ie)}")
         except Exception as e:
             result["verified"] = False
             result["details"].append(f"Verification error: {str(e)}")

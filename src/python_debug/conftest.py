@@ -16,7 +16,7 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from debug_report import execute_with_debug, DebugReport
+from .debug_report import execute_with_debug, DebugReport
 
 
 # ============================================================================
@@ -108,7 +108,7 @@ def timeline_memory_tracker():
 @pytest.fixture
 def pattern_detection_timer():
     """Measure pattern detection performance."""
-    from bug_patterns import BugPatternDetector
+    from .bug_patterns import BugPatternDetector
     
     class PatternTimer:
         def __init__(self):
@@ -265,7 +265,7 @@ class DebugAssertions:
     @staticmethod
     def assert_detects_pattern(report, expected_pattern):
         """Assert that a specific pattern is detected."""
-        from bug_patterns import BugPatternDetector
+        from .bug_patterns import BugPatternDetector
         
         detector = BugPatternDetector(report)
         patterns = detector.analyze()

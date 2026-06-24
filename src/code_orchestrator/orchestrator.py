@@ -15,11 +15,11 @@ from .type_stubs import (
     CoverageReport,
     CodeStructure,
     DecompositionPlan,
-    FunctionResult,
     OperationError,
     ToolRecommendation,
     VerificationState,
 )
+from .types import FunctionResult
 from .github_analyzer import GitHubProjectAnalyzer
 from .multi_file_analyzer import MultiFileAnalyzer
 from .test_target_extractor import TestTargetExtractor

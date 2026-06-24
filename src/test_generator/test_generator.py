@@ -1155,3 +1155,36 @@ def fibonacci(n: int) -> int:
     print("\nRecommendations:")
     for rec in result.recommendations:
         print(f"  - {rec}")
+
+
+class TestGenerator:
+    """Wrapper class for test generation (v1.1 API)."""
+    
+    @staticmethod
+    def generate_tests(
+        code: str,
+        language: str = "python",
+        docstring: Optional[str] = None,
+        type_hints: bool = True,
+        target_coverage: float = 0.85,
+        include_mutation_testing: bool = True,
+        include_metamorphic: bool = True,
+        include_fuzzing: bool = False,
+        include_red_team: bool = True,
+        include_fixtures: bool = True,
+        max_tests: int = 100,
+    ) -> TestGenerationResult:
+        """Generate comprehensive test suite. See generate_tests() for details."""
+        return generate_tests(
+            code=code,
+            language=language,
+            docstring=docstring,
+            type_hints=type_hints,
+            target_coverage=target_coverage,
+            include_mutation_testing=include_mutation_testing,
+            include_metamorphic=include_metamorphic,
+            include_fuzzing=include_fuzzing,
+            include_red_team=include_red_team,
+            include_fixtures=include_fixtures,
+            max_tests=max_tests,
+        )

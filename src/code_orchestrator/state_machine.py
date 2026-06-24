@@ -7,12 +7,11 @@ from uuid import uuid4
 from .type_stubs import (
     CodeStructure,
     DecompositionPlan,
-    FunctionResult,
     OperationError,
     OperationErrorType,
-    VerificationPhaseStatus,
     VerificationState,
 )
+from .types import FunctionResult, VerificationPhaseStatus
 
 
 class VerificationStateMachine:
