@@ -1,0 +1,492 @@
+---
+name: verification-debugging-suite
+version: 1.1.0
+status: production
+
+interoperability:
+  level: 2
+  message_format: json
+  
+  operations:
+    
+    # =====================================================================
+    # MASTER-DEBUGGER-v5
+    # =====================================================================
+    
+    master_debugger_v5_debug:
+      description: "Execute 4-phase automated debugging on code"
+      input:
+        schema: DebugRequest
+        fields:
+          code:
+            type: string
+            description: "Python code to debug"
+            required: true
+      output:
+        schema: UnifiedReport
+        fields:
+          risk_level:
+            type: string
+            enum: [CRITICAL, HIGH, MEDIUM]
+          phases_executed:
+            type: array
+            items: integer
+          total_issues:
+            type: integer
+          confidence_score:
+            type: number
+            minimum: 0
+            maximum: 1
+          summary:
+            type: string
+      token_cost: 3500
+      execution_time_ms: 5000
+      deterministic: false
+      cacheable: true
+      error_schema: OperationError
+    
+    master_debugger_v5_classify_risk:
+      description: "Classify code risk level (CRITICAL/HIGH/MEDIUM)"
+      input:
+        schema: RiskClassifyRequest
+        fields:
+          code:
+            type: string
+      output:
+        schema: RiskLevel
+        fields:
+          level:
+            type: string
+            enum: [CRITICAL, HIGH, MEDIUM]
+      token_cost: 500
+      execution_time_ms: 1000
+      deterministic: true
+      cacheable: true
+      error_schema: OperationError
+    
+    # =====================================================================
+    # PYTHON-DEBUG-v12.3
+    # =====================================================================
+    
+    python_debug_execute_with_debug:
+      description: "Execute code with full execution tracing"
+      input:
+        schema: ExecuteWithDebugRequest
+        fields:
+          code:
+            type: string
+            description: "Python code to execute"
+          max_timeline_events:
+            type: integer
+            default: 10000
+      output:
+        schema: DebugReport
+        fields:
+          timeline:
+            type: array
+            description: "Execution events in order"
+          final_state:
+            type: object
+            description: "Final variable values"
+          execution_time_ms:
+            type: number
+      token_cost: 2000
+      execution_time_ms: 3000
+      deterministic: false
+      cacheable: false
+      error_schema: OperationError
+    
+    python_debug_detect_patterns:
+      description: "Detect bug patterns in execution trace"
+      input:
+        schema: BugPatternRequest
+        fields:
+          debug_report:
+            type: object
+            description: "DebugReport from execute_with_debug"
+      output:
+        schema: BugPatternResult
+        fields:
+          patterns:
+            type: array
+            items:
+              type: object
+              fields:
+                pattern_type: string
+                severity: string
+                location: string
+      token_cost: 1500
+      execution_time_ms: 500
+      deterministic: true
+      cacheable: true
+      error_schema: OperationError
+    
+    # =====================================================================
+    # PYPROVER-v14.0
+    # =====================================================================
+    
+    pyprover_verify_contract:
+      description: "Verify formal contract (precondition, postcondition)"
+      input:
+        schema: VerifyContractRequest
+        fields:
+          code:
+            type: string
+            description: "Code with contract comments (# Pre:, # Post:)"
+          language:
+            type: string
+            default: python
+            enum: [python, javascript, java, cpp, c, go, rust, typescript, haskell, ocaml, scala, fsharp]
+      output:
+        schema: VerificationResult
+        fields:
+          verified:
+            type: boolean
+          details:
+            type: string
+          counterexample:
+            type: [string, "null"]
+      token_cost: 2500
+      execution_time_ms: 4000
+      deterministic: true
+      cacheable: true
+      error_schema: OperationError
+    
+    # =====================================================================
+    # TEST-GENERATOR-v1.1
+    # =====================================================================
+    
+    test_generator_generate:
+      description: "Generate comprehensive test suite"
+      input:
+        schema: TestGenerationRequest
+        fields:
+          code:
+            type: string
+            description: "Function code to test"
+          language:
+            type: string
+            enum: [python, javascript]
+            default: python
+      output:
+        schema: TestSuite
+        fields:
+          test_cases:
+            type: array
+            items:
+              type: object
+              fields:
+                input: object
+                expected: object
+                category: string
+          coverage_percent:
+            type: number
+            minimum: 0
+            maximum: 100
+          mutation_score:
+            type: number
+            minimum: 0
+            maximum: 1
+      token_cost: 3000
+      execution_time_ms: 3500
+      deterministic: false
+      cacheable: false
+      error_schema: OperationError
+    
+    # =====================================================================
+    # CODE-ORCHESTRATOR-v1.1
+    # =====================================================================
+    
+    code_orchestrator_analyze:
+      description: "Analyze codebase structure and dependencies"
+      input:
+        schema: AnalyzeRequest
+        fields:
+          project_path:
+            type: string
+            description: "Path to project directory"
+      output:
+        schema: CodeAnalysis
+        fields:
+          functions:
+            type: array
+            description: "Detected functions"
+          dependencies:
+            type: array
+          file_count:
+            type: integer
+      token_cost: 2000
+      execution_time_ms: 5000
+      deterministic: true
+      cacheable: true
+      error_schema: OperationError
+    
+    code_orchestrator_analyze_github:
+      description: "Clone and analyze GitHub repository"
+      input:
+        schema: GitHubAnalyzeRequest
+        fields:
+          repo_url:
+            type: string
+            description: "GitHub repository URL"
+      output:
+        schema: CodeAnalysis
+      token_cost: 3000
+      execution_time_ms: 15000
+      deterministic: true
+      cacheable: true
+      error_schema: OperationError
+    
+    code_orchestrator_decompose:
+      description: "Create multi-prompt verification plan"
+      input:
+        schema: DecomposeRequest
+        fields:
+          code_analysis:
+            type: object
+            description: "CodeAnalysis from analyze operation"
+      output:
+        schema: VerificationPlan
+        fields:
+          functions_to_verify:
+            type: array
+          estimated_tokens:
+            type: integer
+          estimated_hours:
+            type: number
+      token_cost: 1000
+      execution_time_ms: 2000
+      deterministic: true
+      cacheable: true
+      error_schema: OperationError
+    
+    # =====================================================================
+    # TROUBLESHOOTING-v1.0
+    # =====================================================================
+    
+    troubleshooting_diagnose:
+      description: "5-phase problem diagnosis and remediation"
+      input:
+        schema: DiagnosisRequest
+        fields:
+          problem:
+            type: string
+            description: "Problem description or error message"
+          context:
+            type: string
+            default: code
+            enum: [code, system, network, deployment, user]
+      output:
+        schema: DiagnosisResult
+        fields:
+          classified_stage:
+            type: string
+            enum: [input, processing, output]
+          possible_causes:
+            type: array
+            items: string
+          remediation_steps:
+            type: array
+            items: string
+          verification_passed:
+            type: boolean
+      token_cost: 1500
+      execution_time_ms: 2000
+      deterministic: false
+      cacheable: false
+      error_schema: OperationError
+
+# =========================================================================
+# ERROR SCHEMA
+# =========================================================================
+
+error_schema:
+  name: OperationError
+  fields:
+    error_type:
+      type: string
+      enum: [INVALID_INPUT, EXECUTION_FAILED, TIMEOUT, DEPENDENCY_MISSING, PERMISSION_DENIED]
+    message:
+      type: string
+    details:
+      type: object
+
+# =========================================================================
+# INPUT SCHEMAS (Required for all operations)
+# =========================================================================
+
+input_schemas:
+  DebugRequest:
+    type: object
+    required: [code]
+    fields:
+      code:
+        type: string
+  
+  RiskClassifyRequest:
+    type: object
+    required: [code]
+    fields:
+      code:
+        type: string
+  
+  ExecuteWithDebugRequest:
+    type: object
+    required: [code]
+    fields:
+      code:
+        type: string
+      max_timeline_events:
+        type: integer
+        default: 10000
+  
+  BugPatternRequest:
+    type: object
+    required: [debug_report]
+    fields:
+      debug_report:
+        type: object
+  
+  VerifyContractRequest:
+    type: object
+    required: [code]
+    fields:
+      code:
+        type: string
+      language:
+        type: string
+        default: python
+  
+  TestGenerationRequest:
+    type: object
+    required: [code]
+    fields:
+      code:
+        type: string
+      language:
+        type: string
+        default: python
+  
+  AnalyzeRequest:
+    type: object
+    required: [project_path]
+    fields:
+      project_path:
+        type: string
+  
+  GitHubAnalyzeRequest:
+    type: object
+    required: [repo_url]
+    fields:
+      repo_url:
+        type: string
+  
+  DecomposeRequest:
+    type: object
+    required: [code_analysis]
+    fields:
+      code_analysis:
+        type: object
+  
+  DiagnosisRequest:
+    type: object
+    required: [problem]
+    fields:
+      problem:
+        type: string
+      context:
+        type: string
+        default: code
+
+# =========================================================================
+# OUTPUT SCHEMAS (Required for all operations)
+# =========================================================================
+
+output_schemas:
+  UnifiedReport:
+    type: object
+    fields:
+      risk_level:
+        type: string
+      phases_executed:
+        type: array
+      total_issues:
+        type: integer
+      confidence_score:
+        type: number
+      summary:
+        type: string
+  
+  RiskLevel:
+    type: object
+    fields:
+      level:
+        type: string
+  
+  DebugReport:
+    type: object
+    fields:
+      timeline:
+        type: array
+      final_state:
+        type: object
+      execution_time_ms:
+        type: number
+  
+  BugPatternResult:
+    type: object
+    fields:
+      patterns:
+        type: array
+  
+  VerificationResult:
+    type: object
+    fields:
+      verified:
+        type: boolean
+      details:
+        type: string
+      counterexample:
+        type: [string, "null"]
+  
+  TestSuite:
+    type: object
+    fields:
+      test_cases:
+        type: array
+      coverage_percent:
+        type: number
+      mutation_score:
+        type: number
+  
+  CodeAnalysis:
+    type: object
+    fields:
+      functions:
+        type: array
+      dependencies:
+        type: array
+      file_count:
+        type: integer
+  
+  VerificationPlan:
+    type: object
+    fields:
+      functions_to_verify:
+        type: array
+      estimated_tokens:
+        type: integer
+      estimated_hours:
+        type: number
+  
+  DiagnosisResult:
+    type: object
+    fields:
+      classified_stage:
+        type: string
+      possible_causes:
+        type: array
+      remediation_steps:
+        type: array
+      verification_passed:
+        type: boolean

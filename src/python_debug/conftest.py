@@ -1,11 +1,8 @@
 """
-pytest configuration for python-debug v12.3
+pytest configuration for python-debug v12.3 (component-specific fixtures).
 
-Provides:
-- Execution timing fixtures
-- Debug scenario fixtures
-- Custom markers for test categorization
-- Performance regression tracking
+Provides component-specific fixtures for execution timing, memory tracking,
+and debug scenarios. Marker registration is centralized in src/conftest.py.
 """
 
 import pytest
@@ -17,26 +14,6 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from .debug_report import execute_with_debug, DebugReport
-
-
-# ============================================================================
-# CUSTOM MARKERS
-# ============================================================================
-
-def pytest_configure(config):
-    """Register custom pytest markers."""
-    config.addinivalue_line(
-        "markers", "tracing: tests for execution tracing functionality"
-    )
-    config.addinivalue_line(
-        "markers", "patterns: tests for bug pattern detection"
-    )
-    config.addinivalue_line(
-        "markers", "performance: performance/benchmark tests"
-    )
-    config.addinivalue_line(
-        "markers", "integration: integration tests combining multiple features"
-    )
 
 
 # ============================================================================

@@ -1,6 +1,6 @@
 ---
 name: verification-debugging-suite
-version: 1.0.0
+version: 1.1.0
 status: production
 description: >
   Unified verification and debugging orchestrator combining formal verification (pyprover v14.0),
@@ -246,6 +246,18 @@ print(f"Verified: {diagnosis.verification_passed}")
 
 ---
 
+
+## Quick Workflows
+
+For complete workflow examples with detailed explanations, see:
+- **Debug & Fix Function** – Use MasterDebuggerV5 + TestGenerator
+- **Verify GitHub Project** – Use CodeOrchestrator with GitHub integration
+- **Diagnose & Troubleshoot** – Use Troubleshooter for systematic problem analysis
+
+Examples: See `docs/examples/` or CHANGELOG.md for real-world use cases.
+
+---
+
 ## When to Use Each Component
 
 ### Master-Debugger-v5
@@ -289,80 +301,6 @@ print(f"Verified: {diagnosis.verification_passed}")
 - ✅ You want root cause analysis
 - ✅ You need remediation guidance
 - ❌ Don't use for code that works (use verifier instead)
-
----
-
-## Workflow Examples
-
-### Example 1: Debug & Fix Function
-
-```python
-from verification_debugging_suite import MasterDebuggerV5
-from verification_debugging_suite.test_generator import TestGenerator
-
-# Step 1: Debug with master-debugger-v5
-debugger = MasterDebuggerV5()
-code = """
-def calculate_discount(price, discount_percent):
-    return price * (100 - discount_percent) / 100
-"""
-report = debugger.debug(code)
-
-# Step 2: Generate tests to verify fix
-generator = TestGenerator()
-tests = generator.generate_tests(code)
-
-# Step 3: Run tests
-for test in tests.test_cases:
-    print(f"Test: {test.input} → {test.expected}")
-```
-
-### Example 2: Verify GitHub Project
-
-```python
-from verification_debugging_suite.code_orchestrator import CodeOrchestrator
-
-orchestrator = CodeOrchestrator()
-
-# Clone and analyze
-analysis = orchestrator.analyze_github("https://github.com/user/repo")
-
-# Get verification plan
-plan = orchestrator.decompose(analysis)
-
-# Check coverage
-print(f"Functions to verify: {len(plan.functions)}")
-print(f"Estimated time: {plan.estimated_hours} hours")
-print(f"Token budget: {plan.token_estimate}")
-
-# Verify (across multiple prompts)
-for checkpoint in orchestrator.checkpoints():
-    # Each checkpoint: verify batch of functions
-    results = orchestrator.run_checkpoint(checkpoint)
-    print(f"Verified {results.count} functions")
-```
-
-### Example 3: Diagnose & Troubleshoot
-
-```python
-from verification_debugging_suite.troubleshooting import Troubleshooter
-
-troubleshooter = Troubleshooter()
-
-# Get error message
-error = """
-TypeError: 'NoneType' object is not subscriptable
-  File "app.py", line 42, in process
-    result = data[0]
-"""
-
-# Diagnose
-diagnosis = troubleshooter.diagnose(error, context="python")
-
-print(f"Stage: {diagnosis.classified_stage}")       # processing
-print(f"Root cause: {diagnosis.possible_causes}")    # [None value, missing validation]
-print(f"Fix: {diagnosis.remediation_steps}")         # [Add None check, validate input]
-```
 
 ---
 
