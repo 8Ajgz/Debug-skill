@@ -1,33 +1,25 @@
 ---
 name: debug-suite
-version: 1.2.0
+version: 2.0.0
 status: production
 description: >
-  Unified verification and debugging orchestrator combining formal verification (pyprover v14.0),
-  runtime debugging for Python (python-debug v12.3) and JavaScript (javascript-debug v1.0), test generation
-  (test-generator v1.1), and automated problem diagnosis (troubleshooting v1.0). Use this suite for comprehensive
-  code verification across languages, automated debugging with risk classification (CRITICAL/HIGH/MEDIUM), contract
-  verification, test generation, and problem diagnosis. Master-debugger-v5 orchestrates all phases automatically.
-  
-  **Key capabilities:**
-  - 4-phase automated debugging (static analysis → runtime → formal verification → design review)
-  - Runtime debugging for both Python and JavaScript with variable tracking, async/Promise monitoring, and aliasing detection
-  - Formal contract verification with Z3 SMT solver
-  - Comprehensive test generation with mutation testing and red-team adversarial tests
-  - Systematic codebase analysis and GitHub project verification
-  - Universal 5-phase troubleshooting methodology
-  - Unified interoperability layer for seamless cross-component communication
-  - All 8 components work together or standalone
+  Unified debugging and verification suite for 12+ languages. Combines runtime debugging (Python, JavaScript),
+  static analysis (Rust, C, C++), formal verification (PyProver v12 integration), test generation,
+  and problem diagnosis. Features 4-phase automated debugging with risk classification, 12-language support
+  via PyProver bridge, variable tracking, mutation analysis, and graceful degradation. Master-debugger-v6
+  orchestrates all phases automatically.
 
-compatibility: "Python 3.8+ with z3-solver>=4.12, hypothesis>=6.0, pytest>=7.0; Node.js 14+ (for JavaScript debugging)"
-interop_level: 3
+compatibility: "Python 3.8+ with z3-solver>=4.12, hypothesis>=6.0, pytest>=7.0; Node.js 14+ (optional); PyProver v12+ (optional but recommended)"
+interop_level: 4
 ---
 
-# Debug Suite v1.2
+# Debug Suite v2.0
 
-**Status:** Production Ready | **Components:** 8 | **Total Capability:** ~25,000 lines of implementation
+**Status:** Production Ready | **Components:** 9 | **Languages:** 12 (via PyProver bridge) | **Total Capability:** ~30,000 lines
 
-Unified suite combining Python verification, JavaScript debugging, testing, and problem diagnosis tools across multiple languages.
+Unified suite combining runtime debugging (Python, JavaScript), static analysis (Rust, C, C++, Assembly), formal verification (PyProver), comprehensive testing, and problem diagnosis across 12 programming languages.
+
+**NEW in v2.0:** PyProver v12 integration enables formal verification across 12 languages (Python, JavaScript, TypeScript, Rust, C, C++20, Go, Java, C#, WebAssembly, NASM, FASM). Graceful degradation if PyProver unavailable.
 
 ---
 
