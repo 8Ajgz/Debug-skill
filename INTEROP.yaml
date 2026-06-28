@@ -1,6 +1,6 @@
 ---
-name: verification-debugging-suite
-version: 1.1.0
+name: debug-suite
+version: 1.2.0
 status: production
 
 interoperability:
@@ -115,6 +115,102 @@ interoperability:
                 pattern_type: string
                 severity: string
                 location: string
+      token_cost: 1500
+      execution_time_ms: 500
+      deterministic: true
+      cacheable: true
+      error_schema: OperationError
+    
+    # =====================================================================
+    # JAVASCRIPT-DEBUG-v1.0
+    # =====================================================================
+    
+    javascript_debug_execute_with_debug:
+      description: "Execute JavaScript code with full execution tracing and Promise tracking"
+      input:
+        schema: JSExecuteWithDebugRequest
+        fields:
+          code:
+            type: string
+            description: "JavaScript code to execute"
+            required: true
+          global_scope:
+            type: object
+            description: "Variables/functions available in code scope"
+          options:
+            type: object
+            fields:
+              trace_variables:
+                type: boolean
+                default: true
+              timeout:
+                type: integer
+                default: 5000
+                description: "Execution timeout in milliseconds"
+      output:
+        schema: JSDebugReport
+        fields:
+          timeline:
+            type: array
+            description: "Execution events in order"
+          final_state:
+            type: object
+            description: "Final variable values"
+          mutations:
+            type: object
+            description: "Variable mutation history"
+          aliases:
+            type: array
+            description: "Detected aliased variables"
+          promises:
+            type: array
+            description: "Promise/async tracking"
+          execution_time_ms:
+            type: number
+      token_cost: 2500
+      execution_time_ms: 3000
+      deterministic: false
+      cacheable: false
+      error_schema: OperationError
+    
+    javascript_debug_detect_patterns:
+      description: "Detect bug patterns in JavaScript execution trace"
+      input:
+        schema: JSBugPatternRequest
+        fields:
+          debug_report:
+            type: object
+            description: "JSDebugReport from execute_with_debug"
+            required: true
+      output:
+        schema: JSBugPatternResult
+        fields:
+          patterns:
+            type: array
+            items:
+              type: object
+              fields:
+                pattern_type:
+                  type: string
+                  enum:
+                    - NULL_REFERENCE
+                    - TYPE_MISMATCH
+                    - OFF_BY_ONE
+                    - ALIASING_MUTATION
+                    - UNHANDLED_PROMISE
+                    - RACE_CONDITION
+                    - CLOSURE_CAPTURE
+                    - PROTOTYPE_POLLUTION
+                    - MEMORY_LEAK
+                    - FLOATING_POINT
+                severity:
+                  type: string
+                  enum: [CRITICAL, HIGH, MEDIUM, LOW]
+                location:
+                  type: string
+                  description: "Line number and context"
+                details:
+                  type: string
       token_cost: 1500
       execution_time_ms: 500
       deterministic: true

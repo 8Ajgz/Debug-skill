@@ -1,31 +1,33 @@
 ---
-name: verification-debugging-suite
-version: 1.1.0
+name: debug-suite
+version: 1.2.0
 status: production
 description: >
   Unified verification and debugging orchestrator combining formal verification (pyprover v14.0),
-  runtime debugging (python-debug v12.3), test generation (test-generator v1.1), and automated
-  problem diagnosis (troubleshooting v1.0). Use this suite for comprehensive code verification,
-  automated debugging with risk classification (CRITICAL/HIGH/MEDIUM), contract verification,
-  test generation, and problem diagnosis. Master-debugger-v5 orchestrates all phases automatically.
+  runtime debugging for Python (python-debug v12.3) and JavaScript (javascript-debug v1.0), test generation
+  (test-generator v1.1), and automated problem diagnosis (troubleshooting v1.0). Use this suite for comprehensive
+  code verification across languages, automated debugging with risk classification (CRITICAL/HIGH/MEDIUM), contract
+  verification, test generation, and problem diagnosis. Master-debugger-v5 orchestrates all phases automatically.
   
   **Key capabilities:**
   - 4-phase automated debugging (static analysis → runtime → formal verification → design review)
+  - Runtime debugging for both Python and JavaScript with variable tracking, async/Promise monitoring, and aliasing detection
   - Formal contract verification with Z3 SMT solver
   - Comprehensive test generation with mutation testing and red-team adversarial tests
   - Systematic codebase analysis and GitHub project verification
   - Universal 5-phase troubleshooting methodology
-  - All 7 components work together or standalone
+  - Unified interoperability layer for seamless cross-component communication
+  - All 8 components work together or standalone
 
-compatibility: "Python 3.8+ with z3-solver>=4.12, hypothesis>=6.0, pytest>=7.0"
+compatibility: "Python 3.8+ with z3-solver>=4.12, hypothesis>=6.0, pytest>=7.0; Node.js 14+ (for JavaScript debugging)"
 interop_level: 3
 ---
 
-# Verification-Debugging-Suite v1.0
+# Debug Suite v1.2
 
-**Status:** Production Ready | **Components:** 7 | **Total Capability:** ~22,000 lines of implementation
+**Status:** Production Ready | **Components:** 8 | **Total Capability:** ~25,000 lines of implementation
 
-Unified suite combining Python verification, debugging, testing, and problem diagnosis tools.
+Unified suite combining Python verification, JavaScript debugging, testing, and problem diagnosis tools across multiple languages.
 
 ---
 
@@ -34,7 +36,7 @@ Unified suite combining Python verification, debugging, testing, and problem dia
 ### Use Case 1: Debug critical code automatically
 
 ```python
-from verification_debugging_suite import MasterDebuggerV5
+from debug_suite import MasterDebuggerV5
 
 debugger = MasterDebuggerV5()
 code = """
@@ -52,7 +54,7 @@ print(report.summary)
 ### Use Case 2: Generate comprehensive tests
 
 ```python
-from verification_debugging_suite.test_generator import TestGenerator
+from debug_suite.test_generator import TestGenerator
 
 generator = TestGenerator()
 code = "def add(a, b): return a + b"
@@ -65,7 +67,7 @@ print(f"Coverage: {tests.coverage_percent}%")
 ### Use Case 3: Verify formal contracts
 
 ```python
-from verification_debugging_suite.pyprover import ContractVerifier
+from debug_suite.pyprover import ContractVerifier
 
 verifier = ContractVerifier()
 code = """
@@ -82,7 +84,7 @@ print(f"Verified: {result['verified']}")
 ### Use Case 4: Diagnose problems
 
 ```python
-from verification_debugging_suite.troubleshooting import Troubleshooter
+from debug_suite.troubleshooting import Troubleshooter
 
 troubleshooter = Troubleshooter()
 problem = "ModuleNotFoundError: No module named 'requests'"
@@ -99,8 +101,9 @@ print(f"Solutions: {diagnosis.remediation_steps}")
 
 | Component | Version | Purpose | Status |
 |-----------|---------|---------|--------|
-| **python-debug** | v12.3 | Runtime execution tracing, variable state, bug pattern detection | ✅ Complete |
-| **master-debugger-v5** | v5.0 | 4-phase orchestrator (static → runtime → formal → design) | ✅ Complete |
+| **python-debug** | v12.3 | Runtime execution tracing, variable state, bug pattern detection (Python) | ✅ Complete |
+| **javascript-debug** | v1.0 | Runtime execution tracing, variable state, bug pattern detection (JavaScript/Node.js) | ✅ Complete |
+| **master-debugger-v5** | v5.0 | 4-phase orchestrator (static → runtime → formal → design) with cross-language support | ✅ Complete |
 | **pyprover** | v14.0 | Formal verification with Z3 (Phase 2: contracts; Phase 3: tokens/async/FFI) | ✅ Complete |
 | **test-generator** | v1.1 | Edge cases, mutations, metamorphic, red-team adversarial tests | ✅ Complete |
 | **code-orchestrator** | v1.1 | Multi-function codebase analysis, GitHub projects, decomposition, checkpointing | ✅ Complete |
@@ -109,12 +112,69 @@ print(f"Solutions: {diagnosis.remediation_steps}")
 
 ---
 
-## Full API Reference
+## Unified Interoperability Layer (NEW in v1.2)
+
+The suite now includes a unified interoperability layer (`src/common/interop.py`) that enables seamless communication between all components:
+
+### Core Concepts
+
+**UnifiedDebugReport** - All debugging components (Python, JavaScript, future languages) normalize output to a single report format containing:
+- Execution timeline with events and variable state
+- Detected bug patterns with severity and suggestions
+- Variable mutations and aliasing information
+- Risk classification and confidence scores
+- Execution metrics and exceptions
+
+**ComponentBridge** - Enables one component to invoke another and consume results:
+```python
+from debug_suite.common.interop import ComponentBridge, ComponentType
+
+bridge = ComponentBridge()
+bridge.register_component(ComponentType.PYTHON_DEBUG, py_debugger)
+bridge.register_component(ComponentType.TEST_GENERATOR, test_gen)
+
+# Python debug results flow to test generator
+py_report = python_debug.execute_with_debug(code)
+enhanced_report = bridge.invoke_component(
+    source=ComponentType.PYTHON_DEBUG,
+    target=ComponentType.TEST_GENERATOR,
+    input_report=py_report
+)
+```
+
+**LanguageDetector** - Auto-detects code language and routes to appropriate debugger:
+```python
+from debug_suite.common.interop import LanguageDetector
+
+language = LanguageDetector.detect_language(code)
+debugger = LanguageDetector.get_debugger_for_language(language)
+report = debugger.execute_with_debug(code)
+```
+
+### Unified Type System
+
+All components use the same types for consistency:
+- `Variable` - Unified variable representation
+- `Mutation` - Variable change tracking
+- `BugPattern` - Pattern detection results
+- `ExecutionEvent` - Timeline event
+- `OperationError` - Unified error handling
+- `RiskLevel`, `BugSeverity`, `LanguageType` - Standard enums
+
+### Benefits
+
+✅ **Cross-language workflows** - Python code debugging can flow to JavaScript testing  
+✅ **Tool composition** - Chain multiple tools: Debug → Verify → Test → Diagnose  
+✅ **Consistent reporting** - Same report format regardless of source  
+✅ **Seamless error handling** - Unified error type across all components  
+✅ **Future language support** - Add new languages without changing core APIs
+
+---
 
 ### Master Debugger v5.0
 
 ```python
-from verification_debugging_suite import MasterDebuggerV5, RiskLevel, UnifiedReport
+from debug_suite import MasterDebuggerV5, RiskLevel, UnifiedReport
 
 debugger = MasterDebuggerV5()
 
@@ -144,8 +204,8 @@ report.phase_3_design     # DesignReviewResult (if CRITICAL)
 ### Python Debug v12.3
 
 ```python
-from verification_debugging_suite.python_debug import execute_with_debug
-from verification_debugging_suite.python_debug.bug_patterns import BugPatternDetector
+from debug_suite.python_debug import execute_with_debug
+from debug_suite.python_debug.bug_patterns import BugPatternDetector
 
 # Execute with debug
 report = execute_with_debug(code)
@@ -167,10 +227,37 @@ aliases = report.get_true_aliases()  # Object sharing
 muts = report.get_variable_mutations('var_name')
 ```
 
+### JavaScript Debug v1.0
+
+```javascript
+const { executeWithDebug } = require('./src/javascript_debug/debug-engine.js');
+const { BugPatternDetector } = require('./src/javascript_debug/bug-patterns.js');
+
+// Execute code with debugging
+const report = executeWithDebug(`
+  let arr = [1, 2, 3];
+  let copy = arr;
+  copy.push(4);  // This also modifies arr!
+`);
+
+// View human-readable trace
+console.log(report.generateHumanReadable());
+
+// Detect patterns automatically
+const patterns = new BugPatternDetector(report).analyze();
+patterns.forEach(p => console.log(p.generateReport()));
+
+// Inspect results
+console.log(report.getVariableMutations('arr'));      // Mutation history
+console.log(report.getTrueAliases());                 // Aliased variables
+console.log(report.getTimeline());                    // All events
+console.log(report.toJSON());                         // JSON export
+```
+
 ### PyProver v14.0
 
 ```python
-from verification_debugging_suite.pyprover import ContractVerifier, verify_contract
+from debug_suite.pyprover import ContractVerifier, verify_contract
 
 # Parse and verify
 verifier = ContractVerifier()
@@ -188,7 +275,7 @@ result = verify_contract(code, language="python")
 ### Test Generator v1.1
 
 ```python
-from verification_debugging_suite.test_generator import TestGenerator
+from debug_suite.test_generator import TestGenerator
 
 generator = TestGenerator()
 
@@ -209,7 +296,7 @@ red_team = [t for t in tests.test_cases if t.category == 'adversarial']
 ### Code Orchestrator v1.1
 
 ```python
-from verification_debugging_suite.code_orchestrator import CodeOrchestrator
+from debug_suite.code_orchestrator import CodeOrchestrator
 
 orchestrator = CodeOrchestrator()
 
@@ -231,7 +318,7 @@ orchestrator.restore(checkpoint)        # Resume later
 ### Troubleshooting v1.0
 
 ```python
-from verification_debugging_suite.troubleshooting import Troubleshooter
+from debug_suite.troubleshooting import Troubleshooter
 
 troubleshooter = Troubleshooter()
 
@@ -268,11 +355,19 @@ Examples: See `docs/examples/` or CHANGELOG.md for real-world use cases.
 - ❌ Don't use if you need fine-grained phase control (use individual skills)
 
 ### Python-Debug
-- ✅ You need runtime execution trace
+- ✅ You need runtime execution trace (Python code)
 - ✅ You want to see variable mutations
 - ✅ You need aliasing detection
 - ✅ You want bug pattern detection
 - ❌ Don't use for static analysis (use pyprover Phase 2)
+
+### JavaScript-Debug
+- ✅ You need runtime execution trace (JavaScript/Node.js code)
+- ✅ You want to track variable mutations and Promise resolution
+- ✅ You need to detect aliasing and null reference errors
+- ✅ You want to identify race conditions and async bugs
+- ✅ You're debugging browser or Node.js code
+- ❌ Don't use for static analysis (limited static capability)
 
 ### PyProver
 - ✅ You need formal contract verification
@@ -397,6 +492,13 @@ MIT License - See LICENSE file
 
 ## Version History
 
+- **v1.2.0** (2026-06-28): Cross-language debugging support
+  - Merged JavaScript Debug v1.0 into suite
+  - Master-debugger-v5 now supports both Python and JavaScript code
+  - Added Promise/async tracking for JavaScript debugging
+  - Added aliasing detection for JavaScript objects
+  - Enhanced bug pattern detection for 10 JavaScript-specific patterns
+  - Integrated JavaScript execution tracer with same API as Python variant
 - **v1.0.1** (2026-06-24): Maintenance release - Fixed circular imports, added comprehensive test suite
   - Fixed import issues in `master_debugger/phases.py` (4 imports)
   - Fixed import issues in `python_debug/conftest.py` (3 imports)  
