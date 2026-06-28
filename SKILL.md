@@ -1,25 +1,24 @@
 ---
 name: debug-suite
-version: 2.0.0
+version: 2.1.0
 status: production
 description: >
-  Unified debugging and verification suite for 12+ languages. Combines runtime debugging (Python, JavaScript),
-  static analysis (Rust, C, C++), formal verification (PyProver v12 integration), test generation,
-  and problem diagnosis. Features 4-phase automated debugging with risk classification, 12-language support
-  via PyProver bridge, variable tracking, mutation analysis, and graceful degradation. Master-debugger-v6
-  orchestrates all phases automatically.
+  Unified debugging and verification suite for 12+ languages. Complete Rust support (Phases 2-3: borrow checker + clippy).
+  Combines runtime debugging (Python, JavaScript, Rust), static/formal analysis (PyProver v12 integration), test generation,
+  and problem diagnosis. Features 4-phase automated debugging with risk classification, 12-language support via PyProver bridge,
+  graceful tool degradation, and expert Rust lifetime/ownership analysis. Master-debugger-v6 orchestrates all phases.
 
-compatibility: "Python 3.8+ with z3-solver>=4.12, hypothesis>=6.0, pytest>=7.0; Node.js 14+ (optional); PyProver v12+ (optional but recommended)"
+compatibility: "Python 3.8+; Rust toolchain (rustc+clippy) strongly recommended for Rust debugging; PyProver v12+ optional"
 interop_level: 4
 ---
 
-# Debug Suite v2.0
+# Debug Suite v2.1
 
-**Status:** Production Ready | **Components:** 9 | **Languages:** 12 (via PyProver bridge) | **Total Capability:** ~30,000 lines
+**Status:** Production Ready | **Components:** 11 | **Languages:** 12+ | **Rust Support:** ✅ Complete (Phases 2-3)
 
-Unified suite combining runtime debugging (Python, JavaScript), static analysis (Rust, C, C++, Assembly), formal verification (PyProver), comprehensive testing, and problem diagnosis across 12 programming languages.
+Unified suite combining runtime debugging (Python, JavaScript, Rust), static/formal analysis (PyProver), borrow checker analysis (Rust), clippy linting (Rust), comprehensive testing, and problem diagnosis across 12+ programming languages.
 
-**NEW in v2.0:** PyProver v12 integration enables formal verification across 12 languages (Python, JavaScript, TypeScript, Rust, C, C++20, Go, Java, C#, WebAssembly, NASM, FASM). Graceful degradation if PyProver unavailable.
+**NEW in v2.1:** Rust-Debug (Phases 2-3) complete. Parses rustc borrow checker violations, runs clippy for style/safety/performance lints. Graceful degradation if rustc/clippy unavailable. Merges results into unified risk classification.
 
 ---
 

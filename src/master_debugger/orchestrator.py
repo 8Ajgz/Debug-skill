@@ -19,6 +19,13 @@ except ImportError:
     PyProverBridge = None
     invoke_pyprover = None
 
+# Import Rust debugger (Phases 2-3)
+try:
+    from ..rust_debug import RustDebugger, claude_check_and_install
+except ImportError:
+    RustDebugger = None
+    claude_check_and_install = None
+
 
 class DebugPhase(str, Enum):
     STATIC = "static"
@@ -75,8 +82,22 @@ class MasterDebugger:
         """
         self.use_pyprover = use_pyprover
         self.pyprover_bridge = None
+        self.rust_debugger = None
+        
         if use_pyprover and PyProverBridge is not None:
             self.pyprover_bridge = PyProverBridge(use_pyprover=True)
+        
+        if RustDebugger is not None:
+            self.rust_debugger = RustDebugger()
+            # Check if rustc/clippy are available; warn Claude if not
+            if claude_check_and_install:
+                status = claude_check_and_install()
+                if not status.get("all_available"):
+                    print(
+                        "[MasterDebugger] ⚠️  Rust tools not fully installed. "
+                        "Run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+                        file=sys.stderr,
+                    )
     
     async def debug_comprehensive(
         self,
@@ -101,6 +122,10 @@ class MasterDebugger:
         """
         if phases is None:
             phases = ["static", "runtime", "formal", "testing"]
+        
+        # Route to language-specific debugger if available
+        if language.lower() == "rust" and self.rust_debugger is not None:
+            return self.rust_debugger.debug(code)
         
         report = UnifiedDebugReport()
         token_cost = 0
