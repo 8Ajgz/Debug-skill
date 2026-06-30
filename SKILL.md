@@ -1,7 +1,5 @@
 ---
 name: debug-suite
-version: 2.2.0
-status: production
 description: >
   Unified debugging and verification suite for 12+ languages. Full support for Python, JavaScript, Rust
   (Phases 2-3: borrow checker + clippy), and C/C++ (Phase 4: compiler diagnostics + Clang Static Analyzer).
@@ -10,10 +8,14 @@ description: >
   graceful tool degradation, and expert Rust lifetime/ownership + C/C++ memory-safety analysis. Master-debugger-v6 orchestrates all phases.
 
 compatibility: "Python 3.8+; Rust toolchain (rustc+clippy) recommended for Rust debugging; Clang (clang/clang++) recommended for C/C++ debugging; PyProver v12+ optional"
-interop_level: 4
+
+metadata:
+  version: 2.2.5
+  status: production
+  interop_level: 4
 ---
 
-# Debug Suite v2.2
+# Debug Suite v2.2.4
 
 **Status:** Production Ready | **Components:** 12 | **Languages:** 12+ | **Rust Support:** ✅ Complete (Phases 2-3) | **C/C++ Support:** ✅ Complete (Phase 4)
 
@@ -463,8 +465,18 @@ python -m pytest src/ -m "not slow"
 - **Cpp-Debug:** Requires clang/clang++ installed; degrades to empty findings (not an error) otherwise; diagnostic-based, not a full AST transformer
 - **GitHub analysis (code-orchestrator):** Requires read access to repositories
 - **Async tracking:** Via context managers, not actual async execution
-- **PyProver bridge:** `verify()` currently returns a structurally-correct placeholder result (not a real PyProver invocation) since the PyProver package itself isn't installed in this environment — wire `self._pyprover_module.verify(...)` in `pyprover_bridge.py` once PyProver is available
+- **PyProver bridge:** `verify()`/`batch_verify()`/`verify_async()` call the bundled `src/pyprover` package directly (`ContractVerifier`, `AsyncVerifier`); `verify()` still requires `z3-solver` installed to actually prove anything, degrading to an honest "Z3 solver not available" result otherwise, never a fabricated pass/fail
+- **`master_debugger.orchestrator`:** Phase 2 now also runs `verify_async()` and surfaces concurrency findings as `Issue`s in the unified report (previously this entire code path was unreachable - see CHANGELOG 2.2.1/2.2.2)
+- **Async/concurrency detection (`AsyncVerifier`):** text/regex-based heuristic, not AST-based. It now strips comments and single-line string literals before tokenizing (2.2.2 fix removed a bug where the word "await" appearing anywhere in a file, including in a comment or string, flagged nearly every identifier in the file as a "concurrent variable"), but it can still misfire on files whose own source code is *about* concurrency detection (e.g. analyzing `async_verifier.py` itself), and doesn't handle multi-line triple-quoted docstrings.
+- **FFIVerifier (`src/pyprover/ffi_verifier.py`, FFI type/memory/lifetime safety across language pairs):** implemented and unit-tested in isolation, but not yet wired into `pyprover_bridge.py` or `master_debugger`, since its `verify()` API needs a caller-constructed `FFIContract`/`FFISignature` that nothing in the suite currently synthesizes from raw source. Reachable only via direct import for now.
+- **Bundled `src/pyprover` is a reduced subset of the standalone PyProver lineage (v6.1 through v14.0) developed in earlier sessions, not a full port.** Confirmed absent from this package: loop invariant verification (`loop_verifier.py`), parallel/batch verification (`parallel_verifier.py`, ThreadPoolExecutor), contract simplification (`ContractSimplifier`, redundant-clause elimination via iterative Z3 implication checks), SymPy-accelerated expression simplification, Hypothesis property-based test generation, beartype runtime type checking, CBMC/KLEE bounded-model-checking integration, and real per-language parsing for the other 11 of "12 PyProver languages" (the bundled `ContractVerifier` does the same comment-text scan regardless of declared language; it has never had per-language AST adapters). Porting these is a multi-session effort, not a single-pass fix - flagging as a known backlog rather than attempting a partial, unreliable port.
 - **Phases 5-10 (C/C++ DWARF/KLEE, Assembly):** Not yet implemented — see roadmap below
+
+---
+
+## Roadmap
+
+See `roadmap.md` (packaged alongside this file) for the full feature-restoration backlog: three divergent historical PyProver development branches that were never reconciled, a prior completeness audit shown to be unreliable against the actual code, and the original C/C++/Assembly Phases 4-10 plan with current status and 25+ linked source chats. A `legacy_code/` folder (also packaged alongside this file) contains real, recovered-but-untested code fragments for several of the highest-value missing features (loop invariant verification, contract simplification, the JS Node.js parser speedup, the multiline-contract regex fix, the language-adapter interface) so a future agent doesn't have to re-search conversation history from zero - see `legacy_code/README.md`.
 
 ---
 

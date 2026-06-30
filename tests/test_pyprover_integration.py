@@ -276,5 +276,51 @@ class TestAcceptanceCriteria:
         assert bridge.get_supported_languages() == []
 
 
+class TestRealPyProverIntegration:
+    """
+    Verifies the bridge actually invokes the bundled src/pyprover module
+    instead of returning a canned/fake result. Skipped if the bundled
+    pyprover package isn't importable in this environment (PYPROVER_AVAILABLE
+    is computed once at module import time from the same detection bridge
+    uses internally).
+    """
+
+    @pytest.mark.skipif(not PYPROVER_AVAILABLE, reason="bundled pyprover not importable")
+    def test_verify_reflects_real_contract_result(self):
+        bridge = PyProverBridge(use_pyprover=True)
+        assert bridge.is_available()
+
+        report = bridge.verify("def f(x):\n    return x", "python")
+        assert report is not None
+        # Real verification must be deterministic and content-dependent -
+        # i.e. not a fixed placeholder string regardless of input.
+        assert "INCONCLUSIVE" not in report.summary or "did not complete" in report.summary
+        assert report.risk_level in (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.CRITICAL)
+
+    @pytest.mark.skipif(not PYPROVER_AVAILABLE, reason="bundled pyprover not importable")
+    def test_batch_verify_splits_python_functions(self):
+        bridge = PyProverBridge(use_pyprover=True)
+        code = "def f(x):\n    return x\n\ndef g(y):\n    return y * 2\n"
+        results = bridge.batch_verify(code, "python")
+        assert results is not None
+        assert set(results.keys()) == {"f", "g"}
+
+    @pytest.mark.skipif(not PYPROVER_AVAILABLE, reason="bundled pyprover not importable")
+    def test_verify_async_detects_no_patterns_in_sync_code(self):
+        bridge = PyProverBridge(use_pyprover=True)
+        report = bridge.verify_async("def f(x): return x + 1", "python")
+        assert report is not None
+        assert "No async patterns" in report.summary
+
+    @pytest.mark.skipif(not PYPROVER_AVAILABLE, reason="bundled pyprover not importable")
+    def test_verify_async_detects_patterns_in_async_code(self):
+        bridge = PyProverBridge(use_pyprover=True)
+        report = bridge.verify_async(
+            "async def f(x):\n    await g(x)\n    return x", "python"
+        )
+        assert report is not None
+        assert "Async patterns found" in report.summary or "concurrency issue" in report.summary
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

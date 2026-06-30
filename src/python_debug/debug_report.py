@@ -926,8 +926,8 @@ class DebugReport:
             "total_events": len(self.timeline),
             "final_variables": self.final_state,
             "exception": {
-                "type": self.exception_info[0].__name__ if self.exception_info else None,
-                "message": str(self.exception_info[1]) if self.exception_info else None,
+                "type": self.exception_info["exception_type"].__name__ if self.exception_info else None,
+                "message": str(self.exception_info["exception_value"]) if self.exception_info else None,
             },
             "aliases": self.get_true_aliases(),
             "async_events": len(self.get_async_events()),
@@ -942,7 +942,8 @@ class DebugReport:
     def _analyze_cause(self) -> str:
         if not self.exception_info:
             return "Code completed successfully."
-        exc_type, exc_value, _ = self.exception_info
+        exc_type = self.exception_info["exception_type"]
+        exc_value = self.exception_info["exception_value"]
         causes = {
             IndexError: "Attempted to access a list/array index that doesn't exist. Check loop bounds and array length.",
             KeyError: f"Attempted to access dictionary key {exc_value} that doesn't exist. Check key name or use .get().",
@@ -958,7 +959,8 @@ class DebugReport:
         """Quick exception-type-based hints. For deeper pattern matching, use BugPatternDetector."""
         if not self.exception_info:
             return []
-        exc_type, exc_value, _ = self.exception_info
+        exc_type = self.exception_info["exception_type"]
+        exc_value = self.exception_info["exception_value"]
         suggestions: List[str] = []
 
         user_frame = self._user_vars(self.exception_frame or {})
@@ -1027,7 +1029,8 @@ class DebugReport:
         lines.append("=" * 70)
 
         if self.exception_info:
-            exc_type, exc_value, _ = self.exception_info
+            exc_type = self.exception_info["exception_type"]
+            exc_value = self.exception_info["exception_value"]
             lines.append("\nStatus: CRASHED")
             lines.append(f"Exception: {exc_type.__name__} - {exc_value}")
         else:
@@ -1084,7 +1087,8 @@ class DebugReport:
 
     def to_dict(self) -> Dict:
         if self.exception_info:
-            exc_type, exc_value, _ = self.exception_info
+            exc_type = self.exception_info["exception_type"]
+            exc_value = self.exception_info["exception_value"]
             exc_events = [e for e in self.timeline if e.event_type == "exception"]
             summary = {
                 "status": "CRASHED",

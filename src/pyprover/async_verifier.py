@@ -10,7 +10,7 @@ from enum import Enum
 import re
 
 # Import Phase 3 types
-from types_phase3 import (
+from .types_phase3 import (
     AsyncFunction, AsyncContract, AsyncPattern, ConcurrencyIssue,
     AsyncVerificationResult, language_complexity_multiplier
 )
@@ -162,7 +162,11 @@ class AsyncVerifier:
         """
         Detect variables that may be accessed concurrently.
         
-        Heuristic: Variables accessed both before and after await.
+        Heuristic: Variables accessed both before and after await, within a
+        bounded window of the await rather than "anywhere later in the file"
+        (the original sticky-forever flag meant any file mentioning 'await'
+        even once, including in a comment or docstring, flagged nearly every
+        identifier in the rest of the file).
         
         Args:
             source_code: Code to analyze
@@ -171,34 +175,58 @@ class AsyncVerifier:
         Returns:
             List of variable names with potential concurrent access
         """
-        concurrent_vars = []
-        
-        # Split code into statements
-        lines = source_code.split('\n')
-        
-        # Track variable assignments and uses
+        import keyword as _keyword
+
+        AWAIT_WINDOW_LINES = 5
+        # Common builtins/keywords that are never meaningfully "concurrent
+        # variables" - filtering these out is what keeps this heuristic from
+        # flagging every comment word as a race condition.
+        STOPWORDS = set(_keyword.kwlist) | {
+            "self", "cls", "True", "False", "None", "str", "int", "bool",
+            "float", "list", "dict", "set", "tuple", "print", "len", "range",
+            "Optional", "List", "Dict", "Any", "Union", "Tuple", "Set",
+        }
+
+        def strip_comment(line: str) -> str:
+            # Cheap comment + string-literal stripper: good enough for this
+            # heuristic, not a full tokenizer. Doesn't handle multi-line
+            # triple-quoted strings, but single-line string literals (the
+            # common case for words like "await" appearing in error
+            # messages/docstring fragments rather than real code) are
+            # stripped so they can't masquerade as code-level await usage.
+            line = re.sub(r'"[^"]*"', '""', line)
+            line = re.sub(r"'[^']*'", "''", line)
+            idx = line.find('#')
+            return line[:idx] if idx != -1 else line
+
+        lines = [strip_comment(l) for l in source_code.split('\n')]
+
         assigned_vars: Set[str] = set()
         used_after_await: Set[str] = set()
-        
-        in_await_block = False
-        
+        lines_since_await = None
+
         for line in lines:
-            # Check for await
-            if 'await' in line or 'await' in line:
-                in_await_block = True
-            
-            # Simple variable extraction (real implementation would be AST-based)
-            # Pattern: word followed by = or word in expression
-            var_matches = re.findall(r'\b([a-zA-Z_]\w*)\b', line)
-            
-            if in_await_block:
+            if 'await' in line:
+                lines_since_await = 0
+            elif lines_since_await is not None:
+                lines_since_await += 1
+                if lines_since_await > AWAIT_WINDOW_LINES:
+                    lines_since_await = None
+
+            var_matches = {
+                m for m in re.findall(r'\b([a-zA-Z_]\w*)\b', line)
+                if m not in STOPWORDS
+            }
+
+            if lines_since_await is not None:
                 used_after_await.update(var_matches)
             else:
                 assigned_vars.update(var_matches)
-        
-        # Variables assigned before and used after await = concurrent
+
+        # Variables assigned before and used after (within the window) await
+        # = potentially concurrent.
         concurrent_vars = list(assigned_vars & used_after_await)
-        
+
         return concurrent_vars
     
     # ========================================================================

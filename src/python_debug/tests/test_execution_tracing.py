@@ -225,3 +225,56 @@ class TestDebugReportAPI:
         var_dump = report.dump_variables() if hasattr(report, 'dump_variables') else {}
         # Should have variable information
         assert report.final_state is not None
+
+
+class TestCrashReporting:
+    """
+    Regression tests for the exception_info dict-vs-tuple bug: exception_info
+    is set as a dict (see log_exception), but get_execution_summary(),
+    _analyze_cause(), _generate_suggestions(), generate_human_readable(), and
+    to_dict() all previously did `exc_type, exc_value, _ = self.exception_info`
+    or `self.exception_info[0]`/`[1]`, which raised ValueError/KeyError on
+    every single crash. None of the existing tests exercised a crashing
+    program through these report-generation paths, so it went undetected.
+    """
+
+    def test_execution_summary_on_crash(self):
+        report = execute_with_debug("def f(a, b):\n    return a / b\nf(1, 0)\n")
+        summary = report.get_execution_summary()
+        assert summary["exception"]["type"] == "ZeroDivisionError"
+        assert "division by zero" in summary["exception"]["message"]
+
+    def test_analyze_cause_on_crash(self):
+        report = execute_with_debug("def f(a, b):\n    return a / b\nf(1, 0)\n")
+        cause = report._analyze_cause()
+        assert "zero" in cause.lower()
+
+    def test_generate_suggestions_on_crash(self):
+        report = execute_with_debug("def f(a, b):\n    return a / b\nf(1, 0)\n")
+        suggestions = report._generate_suggestions()
+        assert len(suggestions) > 0
+
+    def test_human_readable_report_on_crash(self):
+        report = execute_with_debug("def f(a, b):\n    return a / b\nf(1, 0)\n")
+        text = report.generate_human_readable()
+        assert "CRASHED" in text
+        assert "ZeroDivisionError" in text
+
+    def test_to_dict_on_crash(self):
+        report = execute_with_debug("def f(a, b):\n    return a / b\nf(1, 0)\n")
+        d = report.to_dict()
+        assert d["execution"]["status"] == "crashed"
+        assert d["summary"]["exception_type"] == "ZeroDivisionError"
+        assert d["summary"]["root_cause"]
+
+    def test_to_json_on_crash(self):
+        report = execute_with_debug("def f(a, b):\n    return a / b\nf(1, 0)\n")
+        # Must not raise - to_json() serializes to_dict()'s output.
+        assert len(report.to_json()) > 0
+
+    def test_execution_summary_on_success_unaffected(self):
+        """Successful runs (no exception_info) must still report cleanly."""
+        report = execute_with_debug("x = 1")
+        summary = report.get_execution_summary()
+        assert summary["exception"]["type"] is None
+        assert summary["exception"]["message"] is None

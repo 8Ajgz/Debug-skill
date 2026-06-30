@@ -9,8 +9,7 @@ from dataclasses import dataclass, field
 import time
 from enum import Enum
 
-# Import Phase 3 types (would be: from .types_phase3 import ...)
-from types_phase3 import (
+from .types_phase3 import (
     TokenProfile, TokenCostFactors, TokenProfileReport,
     OperationType, language_complexity_multiplier,
     estimate_async_overhead, estimate_ffi_overhead

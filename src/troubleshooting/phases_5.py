@@ -156,6 +156,13 @@ class Troubleshooter:
         return solutions
     
     def _phase4_verify(self, remediation_steps: List[str]) -> bool:
-        """Phase 4: Verify solution works (placeholder)"""
-        # In practice, would run tests here
+        """
+        Phase 4: Heuristic readiness check, not actual solution verification.
+
+        This methodology operates on a text description of a problem, not on
+        runnable code, so it cannot execute tests to confirm a fix works. It
+        only confirms that Phase 3 produced at least one concrete remediation
+        step to act on. Real verification still requires the user (or
+        master-debugger's Phase 1 runtime check) to run the suggested fix.
+        """
         return len(remediation_steps) > 0

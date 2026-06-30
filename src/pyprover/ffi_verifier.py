@@ -11,7 +11,7 @@ from enum import Enum
 import re
 
 # Import Phase 3 types
-from types_phase3 import (
+from .types_phase3 import (
     FFISignature, FFIContract, FFILanguagePair, FFITypeMapping,
     FFIVerificationResult, MemorySafetyIssue, language_complexity_multiplier
 )

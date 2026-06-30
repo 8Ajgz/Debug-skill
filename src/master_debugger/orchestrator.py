@@ -201,15 +201,30 @@ class MasterDebugger:
                 report.pyprover_result = pyprover_result
                 token_cost += 300
             report.phases_completed.append(DebugPhase.FORMAL)
+
+            # Concurrency analysis (race conditions, deadlocks) via the
+            # PyProver bridge's verify_async(), source-only so it runs
+            # regardless of whether a contract is present.
+            async_issues = self._phase_2_async(code, language)
+            if async_issues:
+                report.issues_found.extend(async_issues)
+                token_cost += 100
         
         # Classify overall health
-        if report.pyprover_result and report.pyprover_result.get("verified"):
+        total_issues = static_issues + runtime_issues + len(report.issues_found)
+        if report.issues_found:
+            # Concurrency findings are HIGH severity by construction
+            # (see _phase_2_async); never report VERIFIED alongside them.
+            report.overall_health = f"⚠️  {total_issues} issue(s) found"
+            report.risk_level = RiskLevel.HIGH
+            report.confidence_score = 0.7
+        elif report.pyprover_result and report.pyprover_result.get("verified"):
             report.overall_health = "✅ VERIFIED"
             report.risk_level = RiskLevel.LOW
             report.confidence_score = 0.95
-        elif static_issues + runtime_issues > 0:
-            report.overall_health = f"⚠️  {static_issues + runtime_issues} issue(s) found"
-            report.risk_level = RiskLevel.HIGH if (static_issues + runtime_issues) > 3 else RiskLevel.MEDIUM
+        elif total_issues > 0:
+            report.overall_health = f"⚠️  {total_issues} issue(s) found"
+            report.risk_level = RiskLevel.HIGH if total_issues > 3 else RiskLevel.MEDIUM
             report.confidence_score = 0.8
         else:
             report.overall_health = "⚠️  INCONCLUSIVE"
@@ -234,17 +249,53 @@ class MasterDebugger:
         
         try:
             result = self.pyprover_bridge.verify(code, language)
-            if result:
-                return {
-                    "verified": getattr(result, "verified", False),
-                    "template_type": getattr(result, "template_type", None),
-                    "error": getattr(result, "error", None),
-                }
-            return None
+            if result is None:
+                return None
+            # `result` is a common.interop.UnifiedDebugReport, not a raw PyProver
+            # JSON dict - it has no `.verified`/`.template_type`/`.error` attributes.
+            # Derive them from the fields it actually has (risk_level, summary).
+            verified = result.risk_level.name == "LOW" and result.confidence_score >= 0.9
+            error = result.summary if result.risk_level.name == "CRITICAL" else None
+            return {
+                "verified": verified,
+                "template_type": "contract",
+                "error": error,
+                "summary": result.summary,
+                "risk_level": result.risk_level.name,
+                "confidence_score": result.confidence_score,
+            }
         except Exception as e:
             print(f"[MasterDebugger] PyProver error: {e}", file=sys.stderr)
             return None
     
+    def _phase_2_async(self, code: str, language: str) -> List[Issue]:
+        """
+        Concurrency analysis using PyProver's AsyncVerifier (race conditions,
+        deadlocks). Converts common.interop.BugPattern findings into this
+        orchestrator's own Issue dataclass.
+        """
+        if not self.pyprover_bridge or not self.pyprover_bridge.is_available():
+            return []
+        try:
+            result = self.pyprover_bridge.verify_async(code, language)
+        except Exception as e:
+            print(f"[MasterDebugger] verify_async error: {e}", file=sys.stderr)
+            return []
+        if result is None or not result.patterns_detected:
+            return []
+        return [
+            Issue(
+                phase=DebugPhase.FORMAL,
+                type=bp.pattern_type,
+                description=bp.description,
+                severity=bp.severity.value,
+                location=bp.location,
+                fix=bp.suggestion or None,
+                confidence=bp.confidence,
+            )
+            for bp in result.patterns_detected
+        ]
+
     def _generate_recommendations(self, report: UnifiedDebugReport) -> List[str]:
         """Generate actionable recommendations based on findings."""
         recommendations = []

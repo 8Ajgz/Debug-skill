@@ -1,6 +1,6 @@
-# Debug-Suite v2.2.0 – Feature Manifest
+# Debug-Suite v2.2.4 – Feature Manifest
 
-**Status:** Production Ready | **Completeness:** 100%
+**Status:** Production Ready | **Tests:** 160/160 passing
 
 ---
 
@@ -9,29 +9,31 @@
 - [x] Type hints on all public functions
 - [x] Structured error handling (OperationError, no exceptions)
 - [x] Module size compliance (≤200 lines per file)
-- [x] Zero production dependencies
+- [ ] Zero production dependencies - INACCURATE as written; requirements.txt declares z3-solver, hypothesis, pytest, pytest-cov. z3-solver is a real runtime dependency of pyprover's verify_contract(); hypothesis is currently a phantom dependency (declared, never imported anywhere in src/ - see roadmap.md §1)
 - [x] Docstrings on all public APIs
 - [x] No **kwargs (using @dataclass configs)
 
 ## Documentation Features
 
-- [x] SKILL.md with frontmatter (meta, description, compatibility)
+- [x] SKILL.md with frontmatter (name, description, compatibility, metadata - validated against the official skill-creator quick_validate.py)
 - [x] API.md with operation signatures
 - [x] INTEROP.yaml with operation metadata
 - [x] openapi.yaml with full OpenAPI 3.0 spec
 - [x] README.md with quick start
 - [x] CHANGELOG.md with version history
 - [x] LICENSE file (MIT)
+- [x] roadmap.md - feature-restoration backlog with 25+ linked source chats (added v2.2.3)
+- [x] legacy_code/ - recovered, untested code fragments for the highest-value missing features, with a README index (added v2.2.4)
 
 ## Testing Features
 
-- [x] Unit tests for all components (144 tests, 144/144 passing)
+- [x] Unit tests for all components (160 tests, 160/160 passing)
 - [x] Contract tests for API compliance
 - [x] Integration tests for workflows
 - [x] pytest.ini with marker configuration
-- [x] >80% code coverage
 - [x] Parametrized edge case tests
 - [x] Real-world scenario tests
+- [x] Regression tests for every bug found via dogfooding (v2.2.1-v2.2.2) - see CHANGELOG.md
 
 ## Interoperability Features
 

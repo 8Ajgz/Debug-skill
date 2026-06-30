@@ -1,5 +1,76 @@
 # Changelog
 
+## [2.2.5] - 2026-06-30
+
+### Fixed
+
+- **SKILL.md frontmatter failed the official skill-creator validator.** `version`, `status`, and `interop_level` were top-level frontmatter keys; `scripts/quick_validate.py` (the actual upload-gating validator in `/mnt/skills/examples/skill-creator/`) only allows `name`, `description`, `license`, `allowed-tools`, `metadata`, `compatibility` at the top level - every prior `.skill` build in this CHANGELOG (2.2.0 through 2.2.4) would have been **rejected on upload** had it gone through the real validation path instead of being hand-zipped. Moved the three extra fields under a `metadata:` block, which the validator explicitly permits arbitrary nested keys under. Confirmed: `python quick_validate.py debug-suite` now reports "Skill is valid!"
+- **MANIFEST.txt overclaimed "Zero production dependencies" and "100% Completeness"** while still listing v2.2.0 - stale since before the 2.2.0 cleanup pass. `requirements.txt` declares real dependencies (z3-solver is genuinely used by `verify_contract()`; hypothesis is a phantom dependency per roadmap.md §1). Corrected, and added `roadmap.md`/`legacy_code/` to the documentation-features checklist.
+
+### Changed
+
+- **Packaging now goes through the official `skill-creator` tooling** (`scripts.package_skill`, which runs `quick_validate.py` before zipping) instead of a hand-rolled `zip -r`. This also changes the on-disk zip layout: contents are now nested under a top-level `debug-suite/` folder (e.g. `debug-suite/SKILL.md`), matching the convention `quick_validate.py`/`package_skill.py` expect, rather than files sitting at the zip root as in 2.2.0-2.2.4's manual builds.
+- Output filename is now `debug-suite.skill` (matching the `name:` frontmatter field and the skill-creator "preserve the original name" convention), not a version-suffixed filename. Version is tracked in `metadata.version` in the frontmatter and in this CHANGELOG, not in the filename.
+
+### Test Suite
+
+- Full suite: **160/160 passing**, unchanged from v2.2.4 - this release is packaging/validation/documentation only, no `src/` changes.
+
+## [2.2.4] - 2026-06-30
+
+### Added
+
+- **`legacy_code/` folder:** Real, recovered-but-untested code fragments for the highest-value items in `roadmap.md`, pulled from conversation history via `conversation_search` rather than re-described from summaries. Includes: the v13.0 `loop_verifier.py` (INIT/STEP/TERM Hoare-logic loop invariant verification) and an even earlier prototype with the full symbolic-execution proof-obligation logic; the v13.1 `ContractSimplifier`/`ContractSimplificationResult` (redundant-clause removal via iterative Z3 implication checks); the Node.js/`acorn` subprocess fix for the JS parser's 10x speed problem; the multiline-`@requires(...)` contract extraction regex fix; and the `LanguageAdapter` 6-method interface + 10-template architecture from the v11.x multi-language adapter system. Every file is explicitly marked with what's missing (search snippets are partial, often truncated mid-function) and what `conversation_search` query would likely recover more - see `legacy_code/README.md` for the full index and usage instructions. This exists so a future restoration pass starts from recovered real code instead of re-discovering the same fragments from scratch.
+- `roadmap.md` §0 and the relevant §2.1/§2.2/§2.3 tables now cross-reference which entries have a recovered fragment in `legacy_code/` and which don't.
+
+## [2.2.3] - 2026-06-30
+
+### Added
+
+- **`roadmap.md`:** Comprehensive feature-restoration roadmap compiled from a full conversation-history search across every component skill merged into this suite (pyprover, python-debug, master-debugger, test-generator, code-orchestrator). Documents three divergent historical PyProver development branches (a library-integration branch reaching v7.0 with Coq/Lean export; a multi-language-adapter branch reaching v13.1 with loop verification, parallel verification, contract simplification, and a 5-layer CBMC/KLEE verification stack; and the branch actually merged into this suite, "v14.0," which is the most feature-poor of the three despite the highest version number). Flags that a prior "100% feature parity" completeness audit (in conversation history) is contradicted by direct code inspection - e.g. it claims Hypothesis property testing is "Complete," but `hypothesis` is a phantom dependency in `requirements.txt` never imported anywhere in `src/`. Includes a prioritized restoration order and a full index of 25 source chat links. Supersedes the C/C++/Assembly Phases 4-10 roadmap previously tracked only in an external document - that roadmap is now reproduced and kept current inside the package itself (§9), with Phase 4 marked done as of v2.2.0.
+
+## [2.2.2] - 2026-06-30
+
+### Context
+
+Searched conversation history for the full lineage behind this suite's merged components (pyprover v6.1→v14.0, python-debug v11→v12.3, master-debugger v1→v6, standardize-skill). Found two categories of issues: (1) integration breakage between already-bundled components, and (2) a large feature gap between the bundled `src/pyprover` and the much more capable standalone PyProver versions developed in earlier sessions. Fixed (1) where contained; documented (2) as a backlog rather than attempting a risky partial port (see Known Limitations in SKILL.md).
+
+### Fixed (component integration)
+
+- **`master_debugger/orchestrator.py` `_phase_2_formal()` discarded every real PyProver result.** It read `result.verified`/`.template_type`/`.error` via `getattr(..., default)` on a `common.interop.UnifiedDebugReport`, which has no such attributes (it has `risk_level`, `confidence_score`, `summary`) - every `getattr` silently fell through to its default, so even after 2.2.1 fixed the bridge to return real verification results, the orchestrator was still discarding all of it and reporting "INCONCLUSIVE" or the wrong "verified" value (it was also comparing two *different* `RiskLevel` enums, the orchestrator's own lowercase-valued one vs. `common.interop`'s uppercase-valued one, which silently fail equality checks since they're different classes with different values). Now correctly derives `verified`/`error` from the report's real `risk_level`/`confidence_score`/`summary`.
+- **`AsyncVerifier` (concurrency detection) was wired into `pyprover_bridge.verify_async()` in 2.2.1 but never connected to the orchestrator that actually drives analysis.** `master_debugger.debug_comprehensive()` now also runs `verify_async()` during the formal-verification phase and merges concurrency findings into `report.issues_found`; overall health/risk classification now accounts for them.
+- **`AsyncVerifier.detect_concurrent_variables()` tokenized every word on every line of a file, including inside comments, docstrings, and string literals, and its "after await" flag was sticky for the rest of the file once set.** Dogfood-testing the newly-wired orchestrator against the suite's own `pyprover_bridge.py` (whose own docstrings discuss "await points") surfaced this immediately: it flagged ~150 tokens including English words like "the", "but", "no" as "concurrently-accessed variables." Now strips comments and single-line string literals before tokenizing, uses a 5-line window after each `await` instead of "rest of file forever," and filters Python keywords/common builtins from candidates.
+- **Contract verification input hardening:** `ContractVerifier.parse_contract()`/`verify_contract()` had no bound on input size (the standalone PyProver v13.1's security-hardening pass added nesting-depth/injection protection that was never ported to this bundled, text-scanning version). Added a 200K-char / 20K-line input guard with an honest rejection result instead of an unbounded scan, plus null-byte stripping in extracted clauses.
+
+### Fixed (dogfood testing: ran the suite's own master-debugger/python-debug against its own source)
+
+- **`python_debug/debug_report.py`: every crash-report code path was broken.** `exception_info` is stored as a 6-key dict (`log_exception()`), but `get_execution_summary()` indexed it as `self.exception_info[0]`/`[1]` (a tuple access on a dict - `TypeError`/`KeyError`), and `_analyze_cause()`, `_generate_suggestions()`, `generate_human_readable()`, and `to_dict()` all did `exc_type, exc_value, _ = self.exception_info`, unpacking a 6-key dict as if it were a 3-tuple (`ValueError: too many values to unpack`). **Every one of these methods crashed on any input that actually raised an exception** - the suite's own crash-reporting feature could not report a crash. None of the existing 144 tests exercised these methods against a crashing program, so this had zero test coverage despite being on the most basic "debug a failing function" path. Fixed all 5 call sites to use dict-key access; added 7 regression tests (`TestCrashReporting`) that run real crashing code through every affected method.
+
+### Test Suite
+
+- Full suite: **160/160 passing** (`python -m pytest tests/ src/ -q`), up from 148 (12 new regression tests: 7 for the exception_info crash-reporting bug, 3 for async false-positive fixes, 2 for input hardening)
+
+## [2.2.1] - 2026-06-30
+
+### Fixed (continued Haiku 4.5 cleanup pass)
+
+- **`src/pyprover/__init__.py` package import was completely broken:** `from .contract_verifier import ContractVerifier, verify_contract` imported a `verify_contract` name that doesn't exist in that module (only `ContractVerifier.verify_contract`, a staticmethod) - this raised `ImportError` on every `import pyprover`, silently caught and reduced to `__all__ = []`. The package has never actually been importable as a whole; only individual submodule imports worked.
+- **`async_verifier.py`, `ffi_verifier.py`, `token_profiler.py` used absolute `from types_phase3 import (...)` instead of `from .types_phase3 import (...)`:** broke as soon as `pyprover` was imported as a package rather than having its directory manually added to `sys.path`.
+- **`src/pyprover/__init__.py` tried `from .async_verifier import async_verifier`:** no such module-level instance was ever defined, only the `AsyncVerifier` class. Now instantiates `async_verifier = AsyncVerifier()` and `ffi_verifier = FFIVerifier()` at package level.
+- **`PyProverBridge.verify()` (`src/common/pyprover_bridge.py`) always returned a fabricated `_create_placeholder_result()`** regardless of whether PyProver was installed or what the input code was - it never called into the real verifier at all. Now calls the bundled `src/pyprover` package's `verify_contract()` (via a new `_adapt_local_result()` shape converter) and returns honest results, including an honest "Z3 solver not available" failure when `z3-solver` isn't installed, instead of a fake static result.
+- **`detect_pyprover_installed()` used a bare `import pyprover`,** which only worked by accident when `src/` happened to be on `sys.path`; now tries the bundled sibling package first (`from .. import pyprover`) and falls back to an externally-installed top-level package.
+- **`PyProverBridge.batch_verify()` was a stub that always returned `None`** when enabled. Now actually splits Python source into top-level functions via `ast` and verifies each one.
+- **`AsyncVerifier` (515 lines: race condition, deadlock, and concurrent-variable detection) was completely orphaned** - never called from any code path outside its own module. Added `PyProverBridge.verify_async()`, which uses the verifier's source-only detection methods (no contract object construction required) and surfaces findings as `BugPattern`s in a `UnifiedDebugReport`. Covered by 4 new tests in `tests/test_pyprover_integration.py`.
+- **`troubleshooting/phases_5.py` `_phase4_verify()` was labeled "verify solution works"** but only checked that Phase 3 produced at least one remediation step; it cannot actually run anything since the methodology operates on a text problem description, not runnable code. Docstring corrected to describe it honestly as a heuristic readiness check.
+
+### Known gap (not fixed, documented)
+
+- `FFIVerifier` (563 lines: FFI type/memory/lifetime safety) remains implemented but unwired - its `verify()` requires a caller-built `FFIContract`, and nothing in the suite currently constructs one from raw source. Unlike `AsyncVerifier`, there's no source-only entry point to delegate to without that synthesis step. Left as a documented limitation in SKILL.md rather than building a contract-inference layer in this pass.
+
+### Test Suite
+
+- Full suite: **148/148 passing** (`python -m pytest tests/ src/ -q`), up from 144 (added 4 tests for real bridge behavior)
+
 ## [2.2.0] - 2026-06-30
 
 ### Added

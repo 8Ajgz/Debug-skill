@@ -36,12 +36,35 @@ from .interop import (
 # ============================================================================
 
 def detect_pyprover_installed() -> bool:
-    """Check if PyProver skill/package is installed and importable."""
+    """
+    Check if PyProver is available, either as the bundled sibling package
+    (src/pyprover, the common case inside this skill) or as an externally
+    installed top-level package.
+    """
     try:
-        import pyprover
+        from .. import pyprover  # noqa: F401  (bundled sibling package)
+        return True
+    except ImportError:
+        pass
+    try:
+        import pyprover  # noqa: F401  (externally installed package)
         return True
     except ImportError:
         return False
+
+
+def _import_pyprover_module():
+    """Return the actual pyprover module (bundled or external), or None."""
+    try:
+        from .. import pyprover
+        return pyprover
+    except ImportError:
+        pass
+    try:
+        import pyprover
+        return pyprover
+    except ImportError:
+        return None
 
 
 PYPROVER_AVAILABLE = detect_pyprover_installed()
@@ -133,7 +156,7 @@ class PyProverBridge:
         """
         self.enabled = use_pyprover and PYPROVER_AVAILABLE
         self.timeout_seconds = timeout_seconds
-        self._pyprover_module = None
+        self._pyprover_module = _import_pyprover_module() if self.enabled else None
     
     def is_available(self) -> bool:
         """Check if PyProver is available and enabled."""
@@ -176,15 +199,15 @@ class PyProverBridge:
         """
         if not self.enabled:
             return None
-        
+
         try:
-            # NOTE: real PyProver invocation (self._pyprover_module.verify(...))
-            # is not wired up in this environment. When PyProver is installed,
-            # replace this block with the actual call and pass its JSON result
-            # straight into _convert_to_unified_report.
-            pyprover_result = self._create_placeholder_result(language)
+            if self._pyprover_module is None:
+                return None
+
+            raw_result = self._pyprover_module.verify_contract(code, language=language)
+            pyprover_result = self._adapt_local_result(raw_result)
             return self._convert_to_unified_report(pyprover_result, language, code=code)
-        
+
         except Exception as e:
             # Log but don't crash - debug-suite continues without PyProver
             print(f"[PyProverBridge] Warning: {e}", file=sys.stderr)
@@ -252,18 +275,112 @@ class PyProverBridge:
         }
         return mapping.get(pyprover_lang.lower())
     
-    def _create_placeholder_result(self, language: str) -> Dict[str, Any]:
-        """Raw-result stand-in used until a real PyProver call is wired up."""
+    def _adapt_local_result(self, raw_result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Adapt the bundled pyprover.verify_contract() output shape
+        ({verified, preconditions_ok, postconditions_ok, details: [str, ...]})
+        to the PyProverResult.from_pyprover_json() shape this bridge expects
+        ({verified, template_type, proof_time, error, constraints}).
+        """
+        details = raw_result.get("details", [])
+        verified = raw_result.get("verified", False)
+        # A failed verification reports its reason as the last detail entry
+        # (e.g. "Z3 solver not available: ..." or "Verification error: ...").
+        error = None
+        if not verified and details:
+            error = details[-1]
         return {
-            "verified": False,
-            "template_type": None,
+            "verified": verified,
+            "template_type": "contract",
             "proof_time": 0.0,
-            "error": None,
-            "constraints": [],
+            "error": error,
+            "constraints": details,
         }
-    
+
+    def verify_async(
+        self,
+        code: str,
+        language: str = "python",
+    ) -> Optional[UnifiedDebugReport]:
+        """
+        Run PyProver's async/concurrency analysis (race conditions, deadlocks)
+        directly from source. Source-only entry point - unlike verify(), which
+        proves contracts, this surfaces concurrency BugPatterns without
+        requiring a caller-constructed AsyncContract.
+
+        Returns None if PyProver/the bundled async_verifier is unavailable.
+        """
+        if not self.enabled or self._pyprover_module is None:
+            return None
+        async_verifier = getattr(self._pyprover_module, "async_verifier", None)
+        if async_verifier is None:
+            return None
+
+        lang_type = self._map_language_type(language) or LanguageType.PYTHON
+
+        patterns = async_verifier.detect_async_patterns(code, language)
+        if not patterns:
+            # Not async code - nothing for this analysis to do.
+            return UnifiedDebugReport(
+                component=ComponentType.PYPROVER,
+                language=lang_type,
+                code=code,
+                risk_level=RiskLevel.LOW,
+                confidence_score=1.0,
+                summary="No async patterns detected; concurrency analysis skipped",
+            )
+
+        concurrent_vars = async_verifier.detect_concurrent_variables(code, language)
+        race_issues = async_verifier.detect_race_conditions(code, concurrent_vars)
+        deadlock_issues = async_verifier.detect_deadlock_patterns(code)
+
+        bug_patterns: List[BugPattern] = []
+        for issue in race_issues:
+            bug_patterns.append(BugPattern(
+                pattern_type=issue.value if hasattr(issue, "value") else str(issue),
+                severity=BugSeverity.HIGH,
+                location="async function",
+                description=f"Potential {issue.value} on concurrently-accessed variable(s): {', '.join(concurrent_vars) or 'unknown'}",
+                component=ComponentType.PYPROVER,
+                language=lang_type,
+                suggestion="Protect concurrent access with a lock or atomic operation",
+                confidence=0.6,
+            ))
+        for issue in deadlock_issues:
+            bug_patterns.append(BugPattern(
+                pattern_type=issue.value if hasattr(issue, "value") else str(issue),
+                severity=BugSeverity.HIGH,
+                location="async function",
+                description=f"Potential {issue.value}: lock held across an await point",
+                component=ComponentType.PYPROVER,
+                language=lang_type,
+                suggestion="Release locks before awaiting, or use timeout-based acquisition",
+                confidence=0.6,
+            ))
+
+        if bug_patterns:
+            risk_level = RiskLevel.HIGH
+            confidence = 0.6
+            summary = f"{len(bug_patterns)} concurrency issue(s) found: " + \
+                      ", ".join(sorted({bp.pattern_type for bp in bug_patterns}))
+        else:
+            risk_level = RiskLevel.LOW
+            confidence = 0.7
+            summary = f"Async patterns found ({len(patterns)}); no concurrency issues detected"
+
+        return UnifiedDebugReport(
+            component=ComponentType.PYPROVER,
+            language=lang_type,
+            code=code,
+            patterns_detected=bug_patterns,
+            risk_level=risk_level,
+            confidence_score=confidence,
+            summary=summary,
+        )
+
     def batch_verify(
         self,
+
         code: str,
         language: str,
     ) -> Optional[Dict[str, UnifiedDebugReport]]:
@@ -277,10 +394,42 @@ class PyProverBridge:
         Returns:
             Dict mapping function names → UnifiedDebugReport, or None if unavailable
         """
-        if not self.enabled:
+        if not self.enabled or self._pyprover_module is None:
             return None
-        
-        return None
+
+        results: Dict[str, UnifiedDebugReport] = {}
+
+        if language.lower() != "python":
+            # The bundled ContractVerifier's pre:/post:/inv: comment parser is
+            # language-agnostic text scanning, but per-function splitting below
+            # uses Python's ast module, so batch mode is Python-only for now.
+            # Single-function verify() still works for any language.
+            report = self.verify(code, language)
+            if report is not None:
+                results["__module__"] = report
+            return results or None
+
+        import ast
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as e:
+            print(f"[PyProverBridge] batch_verify: could not parse code: {e}", file=sys.stderr)
+            return None
+
+        function_nodes = [
+            node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        if not function_nodes:
+            return None
+
+        for node in function_nodes:
+            func_source = ast.get_source_segment(code, node) or ""
+            report = self.verify(func_source, language, function_name=node.name)
+            if report is not None:
+                results[node.name] = report
+
+        return results or None
     
     def detect_language(self, code: str, filename: Optional[str] = None) -> Optional[LanguageType]:
         """
