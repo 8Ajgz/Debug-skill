@@ -15,13 +15,13 @@ class MasterDebuggerV5:
         """Classify code risk level based on domain and complexity"""
         risk_indicators = {
             'RiskLevel.CRITICAL': [
-                'crypto', 'password', 'token', 'secret', 'encrypt',
-                'socket', 'http', 'requests', 'api', 'serialize',
-                'open(', 'write', 'delete', 'chmod', 'permission',
-                'validate', 'authorize', 'authenticate'
+                'cryptography', 'hashlib', 'password', 'encrypt', 'decrypt',
+                'socket', 'requests', 'authenticate', 'authorize',
+                'eval(', 'exec(', 'os.system', 'subprocess', 'pickle.loads',
+                '.write(', 'delete', 'chmod',
             ],
             'RiskLevel.HIGH': [
-                'for ', 'while ', 'recursion', 'def ', 'class ',
+                'open(', 'for ', 'while ', 'recursion', 'def ', 'class ',
                 'state', 'transaction', 'order', 'payment',
                 'complex', 'algorithm', 'binary_search'
             ],
@@ -30,10 +30,15 @@ class MasterDebuggerV5:
         
         code_lower = code.lower()
         
-        # Check for CRITICAL indicators
+        # Check for CRITICAL indicators (security/credential/network sensitive)
         for indicator in risk_indicators['RiskLevel.CRITICAL']:
             if indicator in code_lower:
                 return RiskLevel.CRITICAL
+        
+        # 'open(' for plain file I/O is HIGH on its own (resource lifecycle risk),
+        # independent of the complexity check below.
+        if 'open(' in code_lower:
+            return RiskLevel.HIGH
         
         # Check for HIGH indicators
         for indicator in risk_indicators['RiskLevel.HIGH']:
@@ -51,6 +56,7 @@ class MasterDebuggerV5:
             RiskLevel.CRITICAL: [0, 1, 2, 3],  # All phases
             RiskLevel.HIGH: [0, 1, 2],         # Skip Phase 3 (design)
             RiskLevel.MEDIUM: [0, 1],          # Only static + runtime
+            RiskLevel.LOW: [0],                # Static only
         }
         return phase_map[risk]
     

@@ -115,14 +115,16 @@ class TestCliPPYMerger:
     
     def test_merger_deduplicates(self):
         """Merger should avoid duplicate patterns."""
-        from src.common.interop import BugPattern
+        from src.common.interop import BugPattern, ComponentType, LanguageType
         
         borrow_patterns = [
             BugPattern(
                 pattern_type="double_borrow",
                 severity=BugSeverity.CRITICAL,
-                message="Double borrow",
-                line=5,
+                location="line 5",
+                description="Double borrow",
+                component=ComponentType.RUST_DEBUG,
+                language=LanguageType.RUST,
             )
         ]
         
@@ -130,8 +132,10 @@ class TestCliPPYMerger:
             BugPattern(
                 pattern_type="clippy_unused",
                 severity=BugSeverity.LOW,
-                message="Unused variable",
-                line=10,
+                location="line 10",
+                description="Unused variable",
+                component=ComponentType.RUST_DEBUG,
+                language=LanguageType.RUST,
             )
         ]
         
@@ -145,20 +149,24 @@ class TestCliPPYMerger:
     
     def test_merger_sorts_by_severity(self):
         """Merged patterns should be sorted by severity."""
-        from src.common.interop import BugPattern
+        from src.common.interop import BugPattern, ComponentType, LanguageType
         
         patterns = [
             BugPattern(
                 pattern_type="low",
                 severity=BugSeverity.LOW,
-                message="Low",
-                line=1,
+                location="line 1",
+                description="Low",
+                component=ComponentType.RUST_DEBUG,
+                language=LanguageType.RUST,
             ),
             BugPattern(
                 pattern_type="critical",
                 severity=BugSeverity.CRITICAL,
-                message="Critical",
-                line=1,
+                location="line 2",
+                description="Critical",
+                component=ComponentType.RUST_DEBUG,
+                language=LanguageType.RUST,
             ),
         ]
         

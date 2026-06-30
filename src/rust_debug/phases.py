@@ -17,6 +17,7 @@ from ..common.interop import (
 )
 from .borrow_checker import BorrowCheckerParser, RustBugPatternDetector
 from .clippy_linter import ClippyLinter, CliPPYMerger
+from ..common.interop import ComponentType, LanguageType
 
 
 class RustDebugger:
@@ -44,7 +45,11 @@ class RustDebugger:
         Returns:
             UnifiedDebugReport with all phases executed
         """
-        report = UnifiedDebugReport()
+        report = UnifiedDebugReport(
+            component=ComponentType.RUST_DEBUG,
+            language=LanguageType.RUST,
+            code=code,
+        )
         
         # Phase 0: Static (minimal for Rust - type system is the analyzer)
         phase_0_ok = True  # Placeholder

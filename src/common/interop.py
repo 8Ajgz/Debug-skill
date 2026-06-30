@@ -22,11 +22,13 @@ class ComponentType(Enum):
     """Identifies which component produced a result."""
     PYTHON_DEBUG = "python-debug"
     JAVASCRIPT_DEBUG = "javascript-debug"
+    RUST_DEBUG = "rust-debug"
+    CPP_DEBUG = "cpp-debug"
     PYPROVER = "pyprover"
     TEST_GENERATOR = "test-generator"
     CODE_ORCHESTRATOR = "code-orchestrator"
     TROUBLESHOOTING = "troubleshooting"
-    MASTER_DEBUGGER = "master-debugger-v5"
+    MASTER_DEBUGGER = "master-debugger-v6"
 
 
 class RiskLevel(Enum):
@@ -47,14 +49,23 @@ class BugSeverity(Enum):
 
 
 class LanguageType(Enum):
-    """Supported languages across suite."""
+    """Supported languages across suite.
+
+    Covers the 3 languages with full debug-suite support (Python, JavaScript,
+    Rust) plus all languages reachable via the PyProver formal-verification
+    bridge (12 languages total; NASM and FASM both map to ASSEMBLY).
+    """
     PYTHON = "python"
     JAVASCRIPT = "javascript"
     TYPESCRIPT = "typescript"
     JAVA = "java"
     CPP = "cpp"
+    C = "c"
     RUST = "rust"
     GO = "go"
+    CSHARP = "csharp"
+    WASM = "webassembly"
+    ASSEMBLY = "assembly"
 
 
 @dataclass
@@ -132,6 +143,7 @@ class UnifiedDebugReport:
     # Risk assessment
     risk_level: RiskLevel = RiskLevel.LOW
     confidence_score: float = 0.0  # 0-1
+    summary: str = ""
     
     def to_dict(self) -> Dict:
         """Convert to dict for JSON serialization."""

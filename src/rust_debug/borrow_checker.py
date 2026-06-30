@@ -221,7 +221,7 @@ class RustBugPatternDetector:
                     severity=template["severity"],
                     location=f"line {error.get('line', 1)}",
                     description=error.get("message", template["description"]),
-                    component=ComponentType.RUNTIME,
+                    component=ComponentType.RUST_DEBUG,
                     language=LanguageType.RUST,
                 )
                 patterns.append(pattern)

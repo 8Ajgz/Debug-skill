@@ -26,6 +26,13 @@ except ImportError:
     RustDebugger = None
     claude_check_and_install = None
 
+# Import C/C++ debugger (Phase 4)
+try:
+    from ..cpp_debug import CppDebugger, claude_check_and_install as cpp_check_and_install
+except ImportError:
+    CppDebugger = None
+    cpp_check_and_install = None
+
 
 class DebugPhase(str, Enum):
     STATIC = "static"
@@ -98,6 +105,18 @@ class MasterDebugger:
                         "Run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
                         file=sys.stderr,
                     )
+        
+        self.cpp_debugger = None
+        if CppDebugger is not None:
+            self.cpp_debugger = CppDebugger()
+            if cpp_check_and_install:
+                status = cpp_check_and_install()
+                if not status.get("all_available"):
+                    print(
+                        "[MasterDebugger] ⚠️  Clang tools not fully installed. "
+                        "Run: apt-get install -y clang",
+                        file=sys.stderr,
+                    )
     
     async def debug_comprehensive(
         self,
@@ -126,19 +145,54 @@ class MasterDebugger:
         # Route to language-specific debugger if available
         if language.lower() == "rust" and self.rust_debugger is not None:
             return self.rust_debugger.debug(code)
+        if language.lower() in ("c", "cpp", "c++") and self.cpp_debugger is not None:
+            dialect = "cpp" if language.lower() in ("cpp", "c++") else "c"
+            return self.cpp_debugger.debug(code, dialect=dialect)
         
         report = UnifiedDebugReport()
         token_cost = 0
+        static_issues = 0
+        runtime_issues = 0
         
-        # Phase 0: Static Analysis
-        if "static" in phases:
-            report.phases_completed.append(DebugPhase.STATIC)
-            token_cost += 50
-        
-        # Phase 1: Runtime Debugging
-        if "runtime" in phases:
-            report.phases_completed.append(DebugPhase.RUNTIME)
-            token_cost += 100
+        # Phase 0 + 1 + 3: for Python, delegate to the real static/runtime/design
+        # analyzers (mypy + python-debug execution tracing) instead of stubbing.
+        # Other languages fall back to PyProver-only formal verification (Phase 2)
+        # until a language-specific static/runtime analyzer is added.
+        if language.lower() == "python":
+            try:
+                from .phases import (
+                    Phase0StaticAnalysis,
+                    Phase1RuntimeDebug,
+                    Phase3DesignReview,
+                )
+                if "static" in phases:
+                    static_result = Phase0StaticAnalysis.run(code)
+                    static_issues += len(static_result.mypy_errors) + len(static_result.pylint_issues)
+                    report.phases_completed.append(DebugPhase.STATIC)
+                    token_cost += 50
+                if "runtime" in phases:
+                    runtime_result = Phase1RuntimeDebug.run(code)
+                    runtime_issues += len(runtime_result.patterns_found)
+                    report.phases_completed.append(DebugPhase.RUNTIME)
+                    token_cost += 100
+                if "testing" in phases:
+                    design_result = Phase3DesignReview.run(code)
+                    if not design_result.passed:
+                        runtime_issues += 1
+                    report.phases_completed.append(DebugPhase.TESTING)
+                    token_cost += 200
+            except Exception as e:
+                print(f"[MasterDebugger] Python phase analysis error: {e}", file=sys.stderr)
+        else:
+            if "static" in phases:
+                report.phases_completed.append(DebugPhase.STATIC)
+                token_cost += 50
+            if "runtime" in phases:
+                report.phases_completed.append(DebugPhase.RUNTIME)
+                token_cost += 100
+            if "testing" in phases:
+                report.phases_completed.append(DebugPhase.TESTING)
+                token_cost += 200
         
         # Phase 2: Formal Verification (with PyProver)
         if "formal" in phases:
@@ -148,16 +202,15 @@ class MasterDebugger:
                 token_cost += 300
             report.phases_completed.append(DebugPhase.FORMAL)
         
-        # Phase 3: Design Review & Testing
-        if "testing" in phases:
-            report.phases_completed.append(DebugPhase.TESTING)
-            token_cost += 200
-        
         # Classify overall health
         if report.pyprover_result and report.pyprover_result.get("verified"):
             report.overall_health = "✅ VERIFIED"
             report.risk_level = RiskLevel.LOW
             report.confidence_score = 0.95
+        elif static_issues + runtime_issues > 0:
+            report.overall_health = f"⚠️  {static_issues + runtime_issues} issue(s) found"
+            report.risk_level = RiskLevel.HIGH if (static_issues + runtime_issues) > 3 else RiskLevel.MEDIUM
+            report.confidence_score = 0.8
         else:
             report.overall_health = "⚠️  INCONCLUSIVE"
             report.risk_level = RiskLevel.MEDIUM

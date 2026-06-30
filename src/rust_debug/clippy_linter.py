@@ -137,7 +137,7 @@ edition = "2021"
             severity=severity,
             location=f"line {line}",
             description=text,
-            component=ComponentType.STATIC,
+            component=ComponentType.RUST_DEBUG,
             language=LanguageType.RUST,
         )
     
@@ -182,9 +182,9 @@ class CliPPYMerger:
         merged = list(borrow_patterns)
         
         # Add clippy patterns (check for duplicates by line/type)
-        seen = {(p.line, p.pattern_type) for p in merged}
+        seen = {(p.location, p.pattern_type) for p in merged}
         for pattern in clippy_patterns:
-            key = (pattern.line, pattern.pattern_type)
+            key = (pattern.location, pattern.pattern_type)
             if key not in seen:
                 merged.append(pattern)
                 seen.add(key)
@@ -199,7 +199,7 @@ class CliPPYMerger:
         }
         
         merged.sort(
-            key=lambda p: (severity_order.get(p.severity, 5), p.line)
+            key=lambda p: (severity_order.get(p.severity, 5), p.location)
         )
         
         return merged

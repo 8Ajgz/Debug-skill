@@ -1,5 +1,41 @@
 # Changelog
 
+## [2.2.0] - 2026-06-30
+
+### Added
+
+- **C/C++-Debug (Phase 4 of the multi-language roadmap):**
+  - `src/cpp_debug/diagnostics.py` - compiles C/C++ with `clang -fsyntax-only -Wall -Wextra` and parses warnings/errors
+  - `src/cpp_debug/analyzer.py` - drives the Clang Static Analyzer (`clang --analyze`) for path-sensitive bugs (null deref, memory leaks, div-by-zero)
+  - `src/cpp_debug/classifier.py` - classifies raw diagnostics/findings into unified `BugPattern` objects, deduped + severity-sorted
+  - `src/cpp_debug/phases.py` - `CppDebugger` orchestrating diagnostics + analyzer + a design-review pass (unsafe string APIs, unmatched raw `new`)
+  - `src/cpp_debug/setup.py` - `claude_check_and_install()` for the clang/clang++ toolchain, mirroring `rust_debug/setup.py`
+  - 19 new tests in `src/cpp_debug/tests/test_cpp_debug_phase4.py`, all passing against a real clang 18 install
+  - `master_debugger/orchestrator.py` now routes `language="c"|"cpp"|"c++"` to `CppDebugger` automatically
+  - Added `LanguageType.C` and `ComponentType.{RUST_DEBUG,CPP_DEBUG}` to `common/interop.py`
+
+### Fixed (suite-wide cleanup pass - 20 failing tests → 0)
+
+- `src/__init__.py` was missing entirely, breaking every `from ..x import y` relative import across the package
+- 4 test directories (`master_debugger/tests`, `pyprover/tests`, `python_debug/tests`, `test_generator/tests`) were missing `__init__.py`, breaking relative imports under pytest
+- `master_debugger/__init__.py` exported the legacy v5 orchestrator only; the documented v6/PyProver/Rust-aware `MasterDebugger` in `orchestrator.py` was never wired into the package's static/runtime/design phases - it appended phase labels without running any real analysis. Now delegates to the real `Phase0StaticAnalysis`/`Phase1RuntimeDebug`/`Phase3DesignReview` for Python.
+- `orchestrator_v5.py`'s `classify_risk()` had an overly broad CRITICAL keyword bucket (`open(`, `secret`, `validate`, generic `api`) that false-positived plain file reads as CRITICAL; narrowed to genuinely security/network-sensitive keywords and moved `open(` to its own HIGH-risk check
+- Added missing `RiskLevel.LOW` to `master_debugger/types.py`
+- `PyProverBridge.verify()` was a stub that ignored its input entirely; implemented real `_convert_to_unified_report()` and `_map_language_type()` methods (previously referenced only by tests, never defined) and removed a dead, broken `_create_placeholder_report()` that constructed `UnifiedDebugReport` with nonexistent kwargs
+- Extended `LanguageType` enum from 7 to 11 members (added `C`, `CSHARP`, `WASM`, `ASSEMBLY`) to match the suite's documented "12 PyProver languages" claim
+- Added missing `summary: str` field to `UnifiedDebugReport` dataclass (referenced by tests, never defined)
+- `rust_debug/borrow_checker.py` and `clippy_linter.py` referenced nonexistent enum members `ComponentType.RUNTIME` / `ComponentType.STATIC` and a nonexistent `.line` attribute on `BugPattern` (real field is `.location`); fixed both, added `ComponentType.RUST_DEBUG`
+- `rust_debug/phases.py` constructed `UnifiedDebugReport()` with no arguments despite `component`/`language`/`code` being required fields
+- `tests/test_rust_debug_phases_2_3.py` constructed `BugPattern(message=..., line=...)` using field names that don't exist on the real dataclass (`description`/`location` do); fixed 4 call sites
+- `src/javascript_debug/tests/test_execution_tracing.py` imported from a stale package name (`verification_debugging_suite`) left over from before the project was renamed
+- `src/tests/test_integration.py` asserted `risk_level.value == 'CRITICAL'` against an enum whose value convention is lowercase (`'critical'`) everywhere else in the codebase
+- `MASTER_DEBUGGER` component label updated from stale `"master-debugger-v5"` to `"master-debugger-v6"`
+- SKILL.md was missing version-history entries for v2.0/v2.1 despite the frontmatter version having moved past v1.2; added retroactive entries plus Rust-Debug/Cpp-Debug component docs (the Rust-Debug section was entirely absent from SKILL.md despite being v2.1's headline feature)
+
+### Test Suite
+
+- Full suite: **144/144 passing** (`python -m pytest tests/ src/ -q`), up from 105 passing / 20 failing before this pass
+
 ## [1.1.0] - 2026-06-24
 
 ### Added

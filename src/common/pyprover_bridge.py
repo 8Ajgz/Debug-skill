@@ -27,6 +27,7 @@ from .interop import (
     RiskLevel,
     LanguageType,
     ExecutionEvent,
+    ComponentType,
 )
 
 
@@ -147,9 +148,13 @@ class PyProverBridge:
             LanguageType.JAVASCRIPT,
             LanguageType.TYPESCRIPT,
             LanguageType.RUST,
+            LanguageType.C,
             LanguageType.CPP,
             LanguageType.GO,
             LanguageType.JAVA,
+            LanguageType.CSHARP,
+            LanguageType.WASM,
+            LanguageType.ASSEMBLY,
         ]
     
     def verify(
@@ -173,14 +178,89 @@ class PyProverBridge:
             return None
         
         try:
-            # For now, return a placeholder until real PyProver is called
-            # In production, would call: self._pyprover_module.verify(code, language=language, ...)
-            return self._create_placeholder_report(language)
+            # NOTE: real PyProver invocation (self._pyprover_module.verify(...))
+            # is not wired up in this environment. When PyProver is installed,
+            # replace this block with the actual call and pass its JSON result
+            # straight into _convert_to_unified_report.
+            pyprover_result = self._create_placeholder_result(language)
+            return self._convert_to_unified_report(pyprover_result, language, code=code)
         
         except Exception as e:
             # Log but don't crash - debug-suite continues without PyProver
             print(f"[PyProverBridge] Warning: {e}", file=sys.stderr)
             return None
+    
+    def _convert_to_unified_report(
+        self,
+        pyprover_result: Dict[str, Any],
+        language: str,
+        code: str = "",
+    ) -> UnifiedDebugReport:
+        """
+        Convert a raw PyProver JSON result into debug-suite's UnifiedDebugReport.
+        
+        Classification rules:
+          - verified=True                      -> LOW risk, confidence 1.0, "VERIFIED"
+          - verified=False with an error        -> CRITICAL risk, confidence 0.0, "FAILED"
+          - verified=False with no error (i.e. inconclusive proof) -> MEDIUM risk,
+            confidence 0.5, "INCONCLUSIVE"
+        """
+        result = PyProverResult.from_pyprover_json(pyprover_result)
+        lang_type = self._map_language_type(language) or LanguageType.PYTHON
+        
+        if result.verified:
+            risk_level = RiskLevel.LOW
+            confidence = 1.0
+            summary = f"VERIFIED: {result.template_type or 'proof'} succeeded in {result.proof_time:.2f}s"
+        elif result.error:
+            risk_level = RiskLevel.CRITICAL
+            confidence = 0.0
+            summary = f"FAILED: {result.error}"
+        else:
+            risk_level = RiskLevel.MEDIUM
+            confidence = 0.5
+            summary = f"INCONCLUSIVE: proof did not complete ({result.template_type or 'unknown template'})"
+        
+        return UnifiedDebugReport(
+            component=ComponentType.PYPROVER,
+            language=lang_type,
+            code=code,
+            risk_level=risk_level,
+            confidence_score=confidence,
+            summary=summary,
+        )
+    
+    def _map_language_type(self, pyprover_lang: str) -> Optional[LanguageType]:
+        """Map a PyProver language string (e.g. 'csharp', 'nasm') to LanguageType."""
+        mapping = {
+            "python": LanguageType.PYTHON,
+            "javascript": LanguageType.JAVASCRIPT,
+            "typescript": LanguageType.TYPESCRIPT,
+            "rust": LanguageType.RUST,
+            "c": LanguageType.C,
+            "cpp": LanguageType.CPP,
+            "c++": LanguageType.CPP,
+            "go": LanguageType.GO,
+            "java": LanguageType.JAVA,
+            "csharp": LanguageType.CSHARP,
+            "c#": LanguageType.CSHARP,
+            "webassembly": LanguageType.WASM,
+            "wasm": LanguageType.WASM,
+            "nasm": LanguageType.ASSEMBLY,
+            "fasm": LanguageType.ASSEMBLY,
+            "assembly": LanguageType.ASSEMBLY,
+        }
+        return mapping.get(pyprover_lang.lower())
+    
+    def _create_placeholder_result(self, language: str) -> Dict[str, Any]:
+        """Raw-result stand-in used until a real PyProver call is wired up."""
+        return {
+            "verified": False,
+            "template_type": None,
+            "proof_time": 0.0,
+            "error": None,
+            "constraints": [],
+        }
     
     def batch_verify(
         self,
@@ -256,26 +336,7 @@ class PyProverBridge:
             return LanguageType.JAVA
         
         return None
-    
-    def _create_placeholder_report(self, language: str) -> UnifiedDebugReport:
-        """Create a placeholder UnifiedDebugReport for Phase 1."""
-        return UnifiedDebugReport(
-            risk_level=RiskLevel.MEDIUM,
-            phases_executed=["static", "formal"],
-            timeline=[],
-            variables=[],
-            bug_patterns=[
-                BugPattern(
-                    pattern_type="formal_verification_pending",
-                    severity=BugSeverity.INFO,
-                    message=f"PyProver formal verification available for {language}",
-                    line=1,
-                )
-            ],
-            confidence_score=0.5,
-            phase_2_formal={"verified": False, "template_type": None, "error": "PyProver not invoked yet"},
-            summary=f"Phase 1 placeholder: PyProver integration ready for {language}",
-        )
+
 
 
 # ============================================================================

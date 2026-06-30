@@ -7,6 +7,7 @@ class RiskLevel(Enum):
     CRITICAL = "critical"
     HIGH = "high"
     MEDIUM = "medium"
+    LOW = "low"
 
 @dataclass
 class StaticAnalysisResult:

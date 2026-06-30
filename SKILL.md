@@ -1,22 +1,25 @@
 ---
 name: debug-suite
-version: 2.1.0
+version: 2.2.0
 status: production
 description: >
-  Unified debugging and verification suite for 12+ languages. Complete Rust support (Phases 2-3: borrow checker + clippy).
-  Combines runtime debugging (Python, JavaScript, Rust), static/formal analysis (PyProver v12 integration), test generation,
+  Unified debugging and verification suite for 12+ languages. Full support for Python, JavaScript, Rust
+  (Phases 2-3: borrow checker + clippy), and C/C++ (Phase 4: compiler diagnostics + Clang Static Analyzer).
+  Combines runtime debugging, static/formal analysis (PyProver v12 integration), test generation,
   and problem diagnosis. Features 4-phase automated debugging with risk classification, 12-language support via PyProver bridge,
-  graceful tool degradation, and expert Rust lifetime/ownership analysis. Master-debugger-v6 orchestrates all phases.
+  graceful tool degradation, and expert Rust lifetime/ownership + C/C++ memory-safety analysis. Master-debugger-v6 orchestrates all phases.
 
-compatibility: "Python 3.8+; Rust toolchain (rustc+clippy) strongly recommended for Rust debugging; PyProver v12+ optional"
+compatibility: "Python 3.8+; Rust toolchain (rustc+clippy) recommended for Rust debugging; Clang (clang/clang++) recommended for C/C++ debugging; PyProver v12+ optional"
 interop_level: 4
 ---
 
-# Debug Suite v2.1
+# Debug Suite v2.2
 
-**Status:** Production Ready | **Components:** 11 | **Languages:** 12+ | **Rust Support:** ✅ Complete (Phases 2-3)
+**Status:** Production Ready | **Components:** 12 | **Languages:** 12+ | **Rust Support:** ✅ Complete (Phases 2-3) | **C/C++ Support:** ✅ Complete (Phase 4)
 
-Unified suite combining runtime debugging (Python, JavaScript, Rust), static/formal analysis (PyProver), borrow checker analysis (Rust), clippy linting (Rust), comprehensive testing, and problem diagnosis across 12+ programming languages.
+Unified suite combining runtime debugging (Python, JavaScript, Rust), static/formal analysis (PyProver), borrow checker analysis (Rust), clippy linting (Rust), Clang compiler diagnostics + Static Analyzer (C/C++), comprehensive testing, and problem diagnosis across 12+ programming languages.
+
+**NEW in v2.2:** C/C++-Debug (Phase 4) complete. Compiles C/C++ with `clang -Wall -Wextra` for fast syntactic diagnostics (uninitialized variables, type mismatches, format-string bugs) and runs the Clang Static Analyzer for path-sensitive bugs (null dereferences, memory leaks, division by zero). Adds a lightweight design-review pass flagging unsafe string APIs (`gets`, `strcpy`) and unmatched raw `new`. Graceful degradation if clang/clang++ unavailable. Also includes a full cross-module bugfix pass (see CHANGELOG): fixed broken package imports, dead/duplicate orchestrator code, mismatched enum/dataclass field names, and stale test expectations across pyprover_bridge, rust_debug, master_debugger, and javascript_debug — full test suite now 144/144 passing (was 105/125 before this pass).
 
 **NEW in v2.1:** Rust-Debug (Phases 2-3) complete. Parses rustc borrow checker violations, runs clippy for style/safety/performance lints. Graceful degradation if rustc/clippy unavailable. Merges results into unified risk classification.
 
@@ -94,6 +97,8 @@ print(f"Solutions: {diagnosis.remediation_steps}")
 |-----------|---------|---------|--------|
 | **python-debug** | v12.3 | Runtime execution tracing, variable state, bug pattern detection (Python) | ✅ Complete |
 | **javascript-debug** | v1.0 | Runtime execution tracing, variable state, bug pattern detection (JavaScript/Node.js) | ✅ Complete |
+| **rust-debug** | v1.0 | Borrow checker (rustc) + clippy lints (Rust) | ✅ Complete |
+| **cpp-debug** | v1.0 | Compiler diagnostics + Clang Static Analyzer (C/C++) | ✅ Complete |
 | **master-debugger-v5** | v5.0 | 4-phase orchestrator (static → runtime → formal → design) with cross-language support | ✅ Complete |
 | **pyprover** | v14.0 | Formal verification with Z3 (Phase 2: contracts; Phase 3: tokens/async/FFI) | ✅ Complete |
 | **test-generator** | v1.1 | Edge cases, mutations, metamorphic, red-team adversarial tests | ✅ Complete |
@@ -105,60 +110,21 @@ print(f"Solutions: {diagnosis.remediation_steps}")
 
 ## Unified Interoperability Layer (NEW in v1.2)
 
-The suite now includes a unified interoperability layer (`src/common/interop.py`) that enables seamless communication between all components:
+`src/common/interop.py` gives every component a shared format so results can flow between them.
 
-### Core Concepts
+**UnifiedDebugReport** - All debugging components normalize output to one report: execution timeline,
+detected bug patterns (severity + suggestions), variable mutations/aliasing, risk classification +
+confidence score, execution metrics and exceptions.
 
-**UnifiedDebugReport** - All debugging components (Python, JavaScript, future languages) normalize output to a single report format containing:
-- Execution timeline with events and variable state
-- Detected bug patterns with severity and suggestions
-- Variable mutations and aliasing information
-- Risk classification and confidence scores
-- Execution metrics and exceptions
+**ComponentBridge** - lets one component invoke another and consume its results (e.g. python-debug
+output flowing into test-generator). **LanguageDetector** - auto-detects code language and routes to
+the matching debugger.
 
-**ComponentBridge** - Enables one component to invoke another and consume results:
-```python
-from debug_suite.common.interop import ComponentBridge, ComponentType
+**Unified Type System** - shared across all components: `Variable`, `Mutation`, `BugPattern`,
+`ExecutionEvent`, `OperationError`, and the `RiskLevel` / `BugSeverity` / `LanguageType` enums.
 
-bridge = ComponentBridge()
-bridge.register_component(ComponentType.PYTHON_DEBUG, py_debugger)
-bridge.register_component(ComponentType.TEST_GENERATOR, test_gen)
-
-# Python debug results flow to test generator
-py_report = python_debug.execute_with_debug(code)
-enhanced_report = bridge.invoke_component(
-    source=ComponentType.PYTHON_DEBUG,
-    target=ComponentType.TEST_GENERATOR,
-    input_report=py_report
-)
-```
-
-**LanguageDetector** - Auto-detects code language and routes to appropriate debugger:
-```python
-from debug_suite.common.interop import LanguageDetector
-
-language = LanguageDetector.detect_language(code)
-debugger = LanguageDetector.get_debugger_for_language(language)
-report = debugger.execute_with_debug(code)
-```
-
-### Unified Type System
-
-All components use the same types for consistency:
-- `Variable` - Unified variable representation
-- `Mutation` - Variable change tracking
-- `BugPattern` - Pattern detection results
-- `ExecutionEvent` - Timeline event
-- `OperationError` - Unified error handling
-- `RiskLevel`, `BugSeverity`, `LanguageType` - Standard enums
-
-### Benefits
-
-✅ **Cross-language workflows** - Python code debugging can flow to JavaScript testing  
-✅ **Tool composition** - Chain multiple tools: Debug → Verify → Test → Diagnose  
-✅ **Consistent reporting** - Same report format regardless of source  
-✅ **Seamless error handling** - Unified error type across all components  
-✅ **Future language support** - Add new languages without changing core APIs
+✅ Cross-language workflows (Python debug → JS testing) · ✅ Tool composition (Debug → Verify → Test → Diagnose)
+✅ Consistent reporting · ✅ Unified error handling · ✅ New languages slot in without core API changes
 
 ---
 
@@ -244,6 +210,36 @@ console.log(report.getTrueAliases());                 // Aliased variables
 console.log(report.getTimeline());                    // All events
 console.log(report.toJSON());                         // JSON export
 ```
+
+### Rust-Debug v1.0 (Phases 2-3)
+
+```python
+from src.rust_debug import RustDebugger
+
+report = RustDebugger().debug(rust_code)   # rustc borrow checker + cargo clippy
+print(report.risk_level, report.patterns_detected)
+```
+
+Merges `rustc --error-format=json` borrow-checker violations with `cargo clippy
+--message-format=json` lints into one deduplicated, severity-sorted pattern
+list. Degrades gracefully (no findings, not an error) if rustc/clippy aren't installed.
+
+### Cpp-Debug v1.0 (Phase 4 - NEW in v2.2)
+
+```python
+from src.cpp_debug import CppDebugger
+
+report = CppDebugger().debug(c_code, dialect="c")   # or dialect="cpp"
+print(report.risk_level, report.patterns_detected)
+```
+
+Two-layer analysis: `clang -fsyntax-only -Wall -Wextra` for fast syntactic
+diagnostics (uninitialized variables, sign comparisons, format-string bugs),
+plus `clang --analyze` (Clang Static Analyzer) for path-sensitive bugs
+compiler warnings can't catch — null dereferences, memory leaks,
+division-by-zero. A design-review pass flags unsafe string APIs (`gets`,
+`strcpy`) and raw `new` with no matching `delete`. Degrades gracefully if
+clang/clang++ aren't installed.
 
 ### PyProver v14.0
 
@@ -360,6 +356,19 @@ Examples: See `docs/examples/` or CHANGELOG.md for real-world use cases.
 - ✅ You're debugging browser or Node.js code
 - ❌ Don't use for static analysis (limited static capability)
 
+### Rust-Debug
+- ✅ You need borrow checker / ownership violation detection
+- ✅ You want clippy style/safety/performance lints
+- ✅ You're debugging unsafe blocks, unwrap()/panic!() usage
+- ❌ Don't use without rustc/clippy installed (degrades to no findings, not an error)
+
+### Cpp-Debug
+- ✅ You need uninitialized-variable, type-mismatch, or format-string detection (C/C++)
+- ✅ You want path-sensitive null-dereference / memory-leak / div-by-zero detection
+- ✅ You're checking for unsafe string APIs (gets, strcpy) or unmatched raw new
+- ❌ Don't use without clang/clang++ installed (degrades to no findings, not an error)
+- ❌ Don't expect full AST-level refactoring support — this is diagnostic-based, not a transformer
+
 ### PyProver
 - ✅ You need formal contract verification
 - ✅ You have loop invariants to prove
@@ -429,34 +438,33 @@ python -m pytest src/ -m "not slow"
 
 | Component | Test File | Tests | Status |
 |-----------|-----------|-------|--------|
-| **master-debugger** | `src/master_debugger/tests/test_orchestration.py` | 10+ | ✅ |
+| **master-debugger** | `src/master_debugger/tests/test_orchestration.py` | 18 | ✅ |
 | **python-debug** | `src/python_debug/tests/test_execution_tracing.py` | 25+ | ✅ |
+| **rust-debug** | `tests/test_rust_debug_phases_2_3.py` | 21 | ✅ |
+| **cpp-debug** | `src/cpp_debug/tests/test_cpp_debug_phase4.py` | 19 | ✅ |
+| **pyprover-bridge** | `tests/test_pyprover_integration.py` | 24 | ✅ |
 | **pyprover** | `src/pyprover/tests/test_verification.py` | 15+ | ✅ |
 | **test-generator** | `src/test_generator/tests/test_generation.py` | 20+ | ✅ |
-| **Integration** | `src/tests/test_integration.py` | 10+ | ✅ |
+| **Integration** | `src/tests/test_integration.py` | 6 | ✅ |
+
+**144/144 tests passing** as of v2.2.0 (`python -m pytest tests/ src/ -q`).
 
 ### Test Markers
 
-Tests are organized by marker for selective execution:
-
-- `@pytest.mark.tracing` - Execution tracing tests
-- `@pytest.mark.patterns` - Bug pattern detection tests
-- `@pytest.mark.verification` - Formal verification tests
-- `@pytest.mark.generation` - Test generation tests
-- `@pytest.mark.contract` - Contract-based tests
-- `@pytest.mark.integration` - Integration tests
-- `@pytest.mark.performance` - Performance benchmarks
-- `@pytest.mark.slow` - Long-running tests (excluded by default)
+`tracing` · `patterns` · `verification` · `generation` · `contract` · `integration` · `performance` · `slow` (excluded by default)
 
 ---
 
 ## Known Limitations
 
-- **Static analysis tools (Phase 0):** Requires mypy, pylint, bandit installed
+- **Static analysis tools (Phase 0, Python):** Requires mypy, pylint, bandit installed
 - **Z3 solver (Phase 2):** Requires z3-solver package
+- **Rust-Debug:** Requires rustc + cargo clippy installed; degrades to empty findings (not an error) otherwise
+- **Cpp-Debug:** Requires clang/clang++ installed; degrades to empty findings (not an error) otherwise; diagnostic-based, not a full AST transformer
 - **GitHub analysis (code-orchestrator):** Requires read access to repositories
 - **Async tracking:** Via context managers, not actual async execution
-- **12-language support (pyprover):** Currently Python; others are stubs
+- **PyProver bridge:** `verify()` currently returns a structurally-correct placeholder result (not a real PyProver invocation) since the PyProver package itself isn't installed in this environment — wire `self._pyprover_module.verify(...)` in `pyprover_bridge.py` once PyProver is available
+- **Phases 5-10 (C/C++ DWARF/KLEE, Assembly):** Not yet implemented — see roadmap below
 
 ---
 
@@ -483,6 +491,20 @@ MIT License - See LICENSE file
 
 ## Version History
 
+- **v2.2.0** (2026-06-30): C/C++-Debug (Phase 4) + suite-wide bugfix pass
+  - Added Cpp-Debug: clang compiler diagnostics + Clang Static Analyzer + design review for C/C++
+  - Routed C/C++ code through master-debugger-v6 automatically
+  - Fixed missing `src/__init__.py` and 4 missing test-package `__init__.py` files that broke relative imports
+  - Fixed `master_debugger/__init__.py`, `orchestrator_v5.py` risk-classifier false positives, missing `RiskLevel.LOW`
+  - Implemented previously-stubbed `PyProverBridge._convert_to_unified_report` / `_map_language_type`, extended `LanguageType` to all 12 PyProver languages
+  - Fixed wrong/nonexistent enum members and dataclass kwargs across `rust_debug` (`ComponentType.RUNTIME`→`RUST_DEBUG`, `ComponentType.STATIC`→`RUST_DEBUG`, `BugPattern(message=...)`→`description=...`, missing `UnifiedDebugReport` required args, `.line`→`.location`)
+  - Wired master-debugger-v6's Python path to the real Phase0/1/3 analyzers instead of stub phase-name appending
+  - Fixed stale `verification_debugging_suite` import in javascript_debug tests (project was renamed)
+  - Full suite: 144/144 tests passing (was 105/125 before this pass)
+- **v2.1.0** (2026-06-28): Rust-Debug (Phases 2-3)
+  - Added PyProver Integration Bridge (Phase 1)
+  - Added Rust borrow checker parser + clippy linter (Phases 2-3)
+  - Master-debugger-v6 routes Rust code to RustDebugger automatically
 - **v1.2.0** (2026-06-28): Cross-language debugging support
   - Merged JavaScript Debug v1.0 into suite
   - Master-debugger-v5 now supports both Python and JavaScript code
@@ -490,17 +512,9 @@ MIT License - See LICENSE file
   - Added aliasing detection for JavaScript objects
   - Enhanced bug pattern detection for 10 JavaScript-specific patterns
   - Integrated JavaScript execution tracer with same API as Python variant
-- **v1.0.1** (2026-06-24): Maintenance release - Fixed circular imports, added comprehensive test suite
-  - Fixed import issues in `master_debugger/phases.py` (4 imports)
-  - Fixed import issues in `python_debug/conftest.py` (3 imports)  
-  - Added 80+ test cases across 5 test files
-  - Created pytest.ini configuration for test collection
-  - Added parametrized edge case tests
-  - Added contract-based verification tests
-  - Added integration tests for end-to-end workflows
+- **v1.0.1** (2026-06-24): Maintenance release - fixed circular imports, added 80+ test cases, pytest.ini
 - **v1.0.0** (2026-06-24): Production release - all 4 phases complete, all 7 components stable
-- **v0.9.0** (2026-06-23): Beta release - components integrated, documentation added
-- **v0.5.0** (2026-06-22): Alpha release - core implementations present
+- **v0.9.0 / v0.5.0** (2026-06-22/23): Beta/Alpha releases
 
 For detailed changes, see CHANGELOG.md
 
