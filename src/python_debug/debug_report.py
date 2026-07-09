@@ -1036,7 +1036,7 @@ class DebugReport:
         else:
             lines.append("\nStatus: COMPLETED")
 
-        lines.append(f"\nExecution:")
+        lines.append("\nExecution:")
         lines.append(f"  Duration: {self.elapsed_ms():.2f} ms")
         lines.append(f"  Lines executed: {self.lines_executed}")
         lines.append(f"  Events logged: {len(self.timeline)}")
@@ -1045,26 +1045,26 @@ class DebugReport:
             exc_events = [e for e in self.timeline if e.event_type == "exception"]
             if exc_events:
                 ev = exc_events[-1]
-                lines.append(f"\nCrash Location:")
+                lines.append("\nCrash Location:")
                 lines.append(f"  Line {ev.lineno}: {ev.code or '(source unavailable)'}")
-                lines.append(f"\nRoot Cause:")
+                lines.append("\nRoot Cause:")
                 lines.append(f"  {self._analyze_cause()}")
-                lines.append(f"\nVariables at Crash:")
+                lines.append("\nVariables at Crash:")
                 if ev.frame:
                     for var in sorted(ev.frame.keys()):
                         lines.append(f"  {var} = {repr(ev.frame[var])[:80]}")
                 if ev.frame_aliases:
-                    lines.append(f"\nAliases at Crash:")
+                    lines.append("\nAliases at Crash:")
                     for alias in ev.frame_aliases:
                         lines.append(f"  {', '.join(alias['variables'])} reference same object")
         else:
-            lines.append(f"\nFinal Variables:")
+            lines.append("\nFinal Variables:")
             for var in sorted(self.final_state.keys()):
                 lines.append(f"  {var} = {repr(self.final_state[var])[:80]}")
 
         suggestions = self._generate_suggestions()
         if suggestions:
-            lines.append(f"\nSuggestions to Fix:")
+            lines.append("\nSuggestions to Fix:")
             n = 1
             for s in suggestions:
                 if s.startswith("  "):
@@ -1074,11 +1074,11 @@ class DebugReport:
                     n += 1
 
         if self.stdout_output:
-            lines.append(f"\nStdout:")
+            lines.append("\nStdout:")
             for line in self.stdout_output.rstrip().split("\n"):
                 lines.append(f"  {line}")
         if self.stderr_output:
-            lines.append(f"\nStderr:")
+            lines.append("\nStderr:")
             for line in self.stderr_output.rstrip().split("\n"):
                 lines.append(f"  {line}")
 
@@ -1130,12 +1130,12 @@ class DebugReport:
         return json.dumps(self.to_dict(), indent=indent, default=str)
 
     def write_json(self, filename: str) -> str:
-        with open(filename, "w") as f:
+        with open(filename, "w", encoding="utf-8") as f:
             f.write(self.to_json())
         return filename
 
     def write_human(self, filename: str) -> str:
-        with open(filename, "w") as f:
+        with open(filename, "w", encoding="utf-8") as f:
             f.write(self.generate_human_readable())
         return filename
 

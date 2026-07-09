@@ -58,25 +58,38 @@ class ContractVerifier:
             # these can't legitimately appear in a contract clause and
             # have caused parser confusion in other PyProver versions.
             line = line.replace('\x00', '')
-            line_lower = line.lower()
-            
-            if 'pre:' in line_lower or 'precondition' in line_lower:
-                # Extract precondition
-                match = re.search(r'pre:\s*(.*?)(?:\n|$)', line)
-                if match:
-                    spec.preconditions.append(match.group(1))
-            
-            elif 'post:' in line_lower or 'postcondition' in line_lower:
-                # Extract postcondition
-                match = re.search(r'post:\s*(.*?)(?:\n|$)', line)
-                if match:
-                    spec.postconditions.append(match.group(1))
-            
-            elif 'inv:' in line_lower or 'invariant' in line_lower:
-                # Extract invariant
-                match = re.search(r'inv:\s*(.*?)(?:\n|$)', line)
-                if match:
-                    spec.invariants.append(match.group(1))
+            stripped = line.strip()
+
+            # Require the contract marker to appear as a comment prefix:
+            #   # Pre: expr       or   // Pre: expr    or   /* Pre: expr */
+            # This prevents false-positive matches on lines like
+            # "# look for pre:/post:/inv: patterns" that contain the substring
+            # but are not actually contract annotations.
+            pre_match = re.match(
+                r'(?:#|//|/\*)\s*[Pp]re(?:condition)?:\s*(.*?)(?:\*/)?$',
+                stripped
+            )
+            post_match = re.match(
+                r'(?:#|//|/\*)\s*[Pp]ost(?:condition)?:\s*(.*?)(?:\*/)?$',
+                stripped
+            )
+            inv_match = re.match(
+                r'(?:#|//|/\*)\s*[Ii]nv(?:ariant)?:\s*(.*?)(?:\*/)?$',
+                stripped
+            )
+
+            if pre_match:
+                clause = pre_match.group(1).strip()
+                if clause:
+                    spec.preconditions.append(clause)
+            elif post_match:
+                clause = post_match.group(1).strip()
+                if clause:
+                    spec.postconditions.append(clause)
+            elif inv_match:
+                clause = inv_match.group(1).strip()
+                if clause:
+                    spec.invariants.append(clause)
         
         return spec
     

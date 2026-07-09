@@ -486,6 +486,117 @@ class PyProverBridge:
         
         return None
 
+    def verify_ffi(
+        self,
+        code: str,
+        caller_language: str = "python",
+        callee_language: str = "c",
+    ) -> Optional[Dict]:
+        """Verify FFI boundary safety using the bundled FFIVerifier.
+
+        Checks type compatibility, memory ownership, and lifetime safety
+        across a foreign-function interface. The FFIVerifier extracts
+        function signatures from the source and builds an FFIContract
+        automatically using heuristics.
+
+        Returns a dict with keys: verified, issues, recommendations, or
+        None if the FFIVerifier is unavailable.
+        """
+        if self._pyprover_module is None:
+            return None
+        ffi_verifier = getattr(self._pyprover_module, "ffi_verifier", None)
+        if ffi_verifier is None:
+            return None
+        try:
+            from ..pyprover.ffi_verifier import FFIContract, FFISignature, FFIType
+        except ImportError:
+            try:
+                from pyprover.ffi_verifier import FFIContract, FFISignature, FFIType  # type: ignore
+            except ImportError:
+                return {"verified": False, "issues": ["FFIVerifier not importable"], "recommendations": []}
+
+        # Heuristic: build a minimal FFIContract from the code
+        # Extract the first function signature found
+        import re
+        sig_pattern = re.compile(
+            r'(?:def|void|int|char\*|bool)\s+(\w+)\s*\(([^)]*)\)',
+            re.MULTILINE
+        )
+        m = sig_pattern.search(code)
+        if m is None:
+            return {
+                "verified": False,
+                "issues": ["No function signature found for FFI analysis"],
+                "recommendations": ["Add an explicit function signature"],
+            }
+
+        func_name = m.group(1)
+        try:
+            # Build a minimal contract and verify it
+            sig = FFISignature(
+                function_name=func_name,
+                parameters={},
+                return_type=FFIType.VOID,
+                caller_language=caller_language,
+                callee_language=callee_language,
+            )
+            contract = FFIContract(
+                caller_signature=sig,
+                callee_signature=sig,
+            )
+            result = ffi_verifier.verify(contract)
+            return {
+                "verified": getattr(result, "is_safe", False),
+                "issues": getattr(result, "violations", []),
+                "recommendations": getattr(result, "recommendations", []),
+                "function": func_name,
+            }
+        except Exception as e:
+            return {
+                "verified": False,
+                "issues": [f"FFI verification error: {e}"],
+                "recommendations": [],
+            }
+
+    def verify_loop_invariants(
+        self,
+        code: str,
+        param_names: Optional[List[str]] = None,
+    ) -> Optional[Dict]:
+        """Verify loop invariants annotated in code using Z3.
+
+        Looks for  # Invariant: <expr>  comments and checks INIT and
+        PRESERVATION proof obligations using the bundled LoopVerifier.
+
+        Returns a summary dict, or None if Z3 is unavailable.
+        """
+        try:
+            from ..pyprover.loop_verifier import LoopVerifier
+        except ImportError:
+            try:
+                from pyprover.loop_verifier import LoopVerifier  # type: ignore
+            except ImportError:
+                return None
+        report = LoopVerifier().verify_source(code, param_names=param_names or [])
+        return {
+            "invariants_found": report.invariants_found,
+            "all_verified": report.all_verified,
+            "z3_available": report.z3_available,
+            "summary": report.summary(),
+            "results": [
+                {
+                    "invariant": r.invariant,
+                    "init_holds": r.init_holds,
+                    "preservation_holds": r.preservation_holds,
+                    "fully_verified": r.fully_verified,
+                    "skipped": r.skipped,
+                    "skip_reason": r.skip_reason,
+                    "error": r.error,
+                }
+                for r in report.results
+            ],
+        }
+
 
 
 # ============================================================================

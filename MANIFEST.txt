@@ -1,6 +1,8 @@
-# Debug-Suite v2.2.4 – Feature Manifest
+# Debug-Suite v2.6.1 – Feature Manifest
 
-**Status:** Production Ready | **Tests:** 160/160 passing
+**Status:** Production Ready | **Tests:** 359/359 passing
+
+**Note (2026-07-09):** most of this file predates v2.5.0/v2.6.0/v2.6.1 and was not kept current through several releases - the "Known Limitations" section below still claimed "Phases 5-10 not yet implemented" and "Rust-Debug requires rustc + clippy installed" without noting the honest-degradation fix, both stale as of this edit. Corrected the specific stale claims below; the rest of this file (Component Completeness tables predating Phase 5+) has not been fully re-audited line by line this session - treat the CHANGELOG.md and roadmap.md §11 as the more current sources of truth for what's actually implemented and verified.
 
 ---
 
@@ -27,7 +29,7 @@
 
 ## Testing Features
 
-- [x] Unit tests for all components (160 tests, 160/160 passing)
+- [x] Unit tests for all components (359 tests, 359/359 passing as of v2.6.0; was 160 at time this line was first written - see CHANGELOG.md for the version-by-version count)
 - [x] Contract tests for API compliance
 - [x] Integration tests for workflows
 - [x] pytest.ini with marker configuration
@@ -102,18 +104,28 @@
 - [x] Verification of diagnosis
 - [x] Multiple context support
 
-### Rust-Debug-v1.0 (Phases 2-3)
+### Rust-Debug-v2.6.0 (Phases 2-3)
 - [x] Borrow checker parsing (rustc --error-format=json)
 - [x] Clippy lint integration (cargo clippy --message-format=json)
 - [x] Merged, deduplicated, severity-sorted pattern list
-- [x] Graceful degradation without rustc/clippy
-- [x] Claude-facing install checker (setup.py)
+- [x] Graceful degradation without rustc/clippy - AND (v2.6.0) honest confidence/summary reporting when degraded, not just empty results (see CHANGELOG 2.6.0)
+- [x] Claude-facing install checker (setup.py) - apt-first as of v2.6.0, rustup as fallback
 
-### Cpp-Debug-v1.0 (Phase 4)
+### Cpp-Debug-v1.4.0 (Phases 4-6, plus cppcheck and lief as of v2.6.0/v2.6.1)
 - [x] Compiler diagnostics (clang -fsyntax-only -Wall -Wextra)
 - [x] Clang Static Analyzer integration (clang --analyze)
 - [x] Design-review pass (unsafe string APIs, unmatched raw new)
-- [x] Graceful degradation without clang/clang++
+- [x] DWARF memory-layout analysis (Phase 5, pyelftools)
+- [x] CBMC/KLEE symbolic execution (Phase 6; CBMC 6.x flag names fixed in v2.6.0, see CHANGELOG)
+- [x] Cppcheck second-opinion static analyzer (v2.6.0)
+- [x] lief binary hardening (PIE/NX/RELRO/stack-canary) + dangerous-import detection (v2.6.1)
+- [x] Graceful degradation without clang/clang++/cppcheck/lief
+- [x] Claude-facing install checker (setup.py)
+
+### C-Debug-v1.1.0 (Phase 7)
+- [x] strace syscall tracing (double-close, write-after-close, unchecked malloc/open, fork/exec leak risk)
+- [x] valgrind memcheck dynamic memory-error detection (v2.6.0: leaks, invalid read/write, invalid/double free, uninitialised values)
+- [x] Graceful degradation without strace/valgrind
 - [x] Claude-facing install checker (setup.py)
 
 ### Common Utilities
@@ -156,7 +168,9 @@
 - [ ] Cpp-Debug requires clang/clang++ installed
 - [ ] GitHub analysis requires public repository access
 - [ ] Async tracking via context managers (not true async execution)
-- [ ] Phases 5-10 (C/C++ DWARF/KLEE, Assembly disassembly/dataflow/angr) not yet implemented
+- [x] ~~Phases 5-10 (C/C++ DWARF/KLEE, Assembly disassembly/dataflow/angr) not yet implemented~~ - STALE, fixed v2.5.0/v2.6.0: all of Phases 5-10 are implemented and tested (DWARF, CBMC/KLEE, strace, valgrind, Capstone disassembly/CFG, taint dataflow, angr). See CHANGELOG.md.
+- [ ] KLEE has no prebuilt binaries on any platform/package manager checked (pip, apt, GitHub releases) - source-only, requires a patched LLVM + uclibc build. Not a suite bug; documented in roadmap.md §11.2.
+- [ ] Three separate, mutually-incompatible `RiskLevel` enum classes exist in the codebase (`common.interop`, `master_debugger.types`, `master_debugger.orchestrator`) - `==` comparisons across them silently fail despite identical `repr()` output. Not fixed as of v2.6.0; see roadmap.md §11.6 for the full writeup and reproduction.
 
 ## Future Expansion Capacity
 
@@ -166,4 +180,4 @@
 
 ---
 
-**Manifest Generated:** 2026-06-30 | **Version:** 2.2.0
+**Manifest Generated:** 2026-06-30, partially updated 2026-07-09 | **Version:** 2.6.1

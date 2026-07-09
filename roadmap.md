@@ -190,25 +190,25 @@ Reproduced from the uploaded `debug-suite-v2_1` roadmap document, updated agains
 ### Phase 4: C/C++ AST Parser (Clang) - ✅ DONE (v2.2.0)
 Originally estimated 800-1000 lines / 2-3 weeks. Shipped in v2.2.0 as `src/cpp_debug/` (diagnostics.py, analyzer.py, classifier.py, phases.py, setup.py), 19 passing tests against a real clang 18 install. Uses `clang -fsyntax-only`/Clang Static Analyzer rather than raw libtooling AST bindings - narrower than originally scoped (no template instantiation graph, no implicit-cast extraction) but functional and tested.
 
-### Phase 5: C/C++ DWARF Symbols - ❌ NOT DONE
-Est. 600-800 lines / 2 weeks. Read DWARF debug info, analyze memory layout, detect use-after-free/double-free via `pyelftools`. No change since original roadmap.
+### Phase 5: C/C++ DWARF Symbols - ✅ DONE (v2.4.0)
+Implemented as `src/cpp_debug/dwarf_analyzer.py` (~340 lines). Reads DWARF via pyelftools, extracts variable layout, classifies stack/global/unknown location kinds, runs three heuristic passes: stack-pointer escape (MEDIUM, conf 0.4), void* untracked heap (MEDIUM, conf 0.45), multi-pointer double-free (HIGH, conf 0.55). Integrated into `CppDebugger.debug()`. 28 tests.
 
-### Phase 6: C/C++ KLEE Symbolic Execution - ❌ NOT DONE
-Est. 500-700 lines / 2-3 weeks. **Now also see §2.3/§7 above** - this should absorb the CBMC integration too, since both were demonstrated working together in the chromium 5-layer test and the original Phase 6 scope (KLEE-only) artificially separated two tools that are normally used together at the same layer.
+### Phase 6: C/C++ KLEE/CBMC Symbolic Execution - ✅ DONE (v2.4.0)
+Implemented as `src/cpp_debug/symbolic_executor.py` (~360 lines). CBMCDriver: `cbmc --unwind 5 --bounds-check --div-by-zero-check --null-pointer-check --overflow-check`. KLEEDriver: `clang -emit-llvm` + `klee --max-time=30s`. SymbolicExecutor runs CBMC then KLEE (C only), deduplicates by (property_type, location). Integrated into `CppDebugger.debug()`. 35 tests (2 skipped — no CBMC in CI).
 
-### Phase 7: C-Debug (simpler C variant) - ❌ NOT DONE
-Est. 300-400 lines / 1-2 weeks. Reuse `cpp_debug` components, add `strace` syscall tracing.
+### Phase 7: C-Debug (simpler C variant) - ✅ DONE (v2.4.0)
+Implemented as `src/c_debug/` module (~370 lines). SyscallTracer compiles with `gcc/clang -g -O0` and runs under `strace -f -e trace=%file,%desc,%process,brk,mmap`. _analyse_events() detects: double-close, write/read-after-close (EBADF), ENOMEM on brk/mmap, ENOENT/EACCES on open, fork+exec fd-leak risk. CDebugger combines CppDebugger(dialect="c") + SyscallTracer. MasterDebugger routes `language="c"` to CDebugger. 29 tests.
 
-### Phase 8: Assembly Disassembly & CFG - ❌ NOT DONE
-Est. 1000-1200 lines / 2-3 weeks. Capstone disassembly, control flow graph construction.
+### Phase 8: Assembly Disassembly & CFG - ✅ DONE (v2.5.0)
+`src/assembly_debug/disassembler.py` + `cfg.py` (~430 lines). Capstone disassembly (x86-64/32, ARM, ARM64), raw bytes or ELF .text. CFGBuilder: leader ID, basic block partition, fallthrough/branch/call edges, DFS back-edge detection, BFS reachability. CFGAnalysis: indirect_control_transfer, unreachable_code, back_edge_loop, no_return_path. 26 tests.
 
-### Phase 9: Assembly Dataflow & Taint Analysis - ❌ NOT DONE
-Est. 1000 lines / 2 weeks.
+### Phase 9: Assembly Dataflow & Taint Analysis - ✅ DONE (v2.5.0)
+`src/assembly_debug/dataflow.py` (~280 lines). Forward worklist taint analysis. Seeds: rdi/rsi/rdx/rcx/r8/r9. Transfer: mov/add/sub/xor propagate; call taints rax if any arg tainted. Sinks: tainted→[mem] (HIGH), tainted→indirect branch (CRITICAL), tainted→syscall (HIGH). 33 tests.
 
-### Phase 10: Assembly angr Symbolic Execution - ❌ NOT DONE
-Est. 600-800 lines / 2-3 weeks.
+### Phase 10: Assembly angr Symbolic Execution - ✅ DONE (v2.5.0)
+`src/assembly_debug/symbolic.py` + `phases.py` (~350 lines). CFGFast for function extraction. SimulationManager with LAZY_SOLVES collects unconstrained (CRITICAL) and errored (HIGH) states. AssemblyDebugger facade: debug_bytes/debug_binary/debug_source. MasterDebugger routes "assembly"/"asm"/"x86_64"/"arm" to AssemblyDebugger. 27 tests.
 
-**Remaining estimated effort for Phases 5-10:** ~7,000-7,200 lines, 16-21 weeks (slightly reduced from the original ~8,000/18-24 weeks since Phase 4 is complete).
+**Original Phase 4-10 roadmap: COMPLETE as of v2.5.0. All 355 tests passing.**
 
 ---
 
@@ -240,3 +240,187 @@ All chats referenced above, for quick navigation:
 - https://claude.ai/chat/7f6e4283-b92a-496f-a744-b27f6aea629a - suite consolidation + javascript-debug merge (v1.1.0→v1.2.0)
 - https://claude.ai/chat/fd6f5b89-b113-4f21-9e82-2c0190bb5339 - debug-suite v2.1 Rust-debug Phases 1-3 (source of the uploaded original roadmap document)
 - https://claude.ai/chat/0d6f7cd2-6bba-4cdd-9fc5-0def656850e8 - v2.2.0 cleanup session (packaging bugs, Phase 4 cpp_debug)
+
+---
+
+## 11. Session addendum (2026-07-09): root __init__.py completeness, dependency verification, RustDebugger honesty fix, valgrind + cppcheck integration
+
+This section documents work from a single continuous session, in the order it happened. Every claim below was verified by actually running the code in this sandbox, not inferred from reading it - status tags follow §0's convention (DONE / MISSING / bug found).
+
+### 11.1 `src/__init__.py` was completely empty - DONE
+
+The uploaded v2.5.0 archive shipped `src/assembly_debug/`, `src/c_debug/`, `src/cpp_debug/`, `src/rust_debug/` (all real, non-stub code, confirmed by direct inspection) but the root `src/__init__.py` - the single-import public API surface (`from src.master_debugger... import MasterDebuggerV5`, `__all__`, `__version__`) - was 0 bytes. Rebuilt it from the v1.0.0 file, extended with all v2.5.0 additions: PyProver loop verification/contract simplification, the cross-language `PyProverBridge`, and facades for all four new language debuggers (`CppDebugger`, `CDebugger`, `AssemblyDebugger`, `RustDebugger`) plus their supporting types. Verified by `import src` and checking every name in `__all__` resolves via `hasattr`, not just that the import statement doesn't raise.
+
+While verifying, found and fixed one more pre-existing bug in the process: the old `__init__.py` imported `generate_tests`/`TestCase`/`TestGenerationResult` from `src.test_generator` (the package), but that package's own `__init__.py` only ever re-exported `TestGenerator`. This import has been broken since v1.0.0 and never actually ran. Fixed by importing from the submodule (`src.test_generator.test_generator`) directly, matching the deep-import convention already used everywhere else in the file.
+
+Current state: `src/__init__.py`, 122 lines, 59 exports (v2.6.0, after §11.4-11.5 below), `import src` succeeds cleanly, every `__all__` name resolves.
+
+### 11.2 Dependency installability: git vs. pip vs. apt, verified per-tool
+
+None of the previously-`MISSING`-per-`cbmc_available()`/`angr_available()`/`klee_available()` tools needed a git clone + from-source build. Tested each directly in this sandbox (network allowlist: `pypi.org`, `archive.ubuntu.com`, `security.ubuntu.com`, `github.com`/`release-assets.githubusercontent.com`, no `rustup.rs`/`sh.rustup.rs`):
+
+| Tool | Path that works | Verified how |
+|---|---|---|
+| `angr` | `pip install angr` (PyPI) | Installed, `import angr` clean, `angr_available()` → `True`. Its `unicorn` dependency initially failed to load (`unicornlib.so`); `pip install --upgrade unicorn` fixed it. |
+| `capstone`, `pyelftools` | `pip install capstone pyelftools` (PyPI) | Already covered by requirements; confirmed both import cleanly. |
+| `cbmc` | **Either** `apt-get install -y cbmc` (Ubuntu universe repo, v5.95.1) **or** the GitHub release `.deb` (`github.com/diffblue/cbmc/releases`, v6.10.0) | Tried the GitHub-release `.deb` path first (downloaded `ubuntu-24.04-cbmc-6.10.0-Linux.deb`, `apt-get install -y ./cbmc.deb`), then discovered apt has it directly too - simpler, prefer apt. `cbmc --version` and `cbmc_available()` both confirmed working either way. |
+| `klee` | **Neither pip, apt, nor a GitHub release asset** - checked `api.github.com/repos/klee/klee/releases`, zero prebuilt binaries on any tag, source-only. Requires a specific patched LLVM + uclibc build, realistically a Docker-image install (`klee/klee`), not sandbox-buildable in reasonable time. | Confirmed via GitHub API, not attempted further - would burn significant budget for a tool this suite already reports as unavailable honestly (`klee_available()` correctly returns `False`, and the existing `symbolic_executor.py` docstring already accurately describes KLEE as a "heavier dependency," so no doc fix was needed there). |
+| `rustc`, `cargo` | `apt-get install -y rustc cargo` (Ubuntu main repo, v1.75.0) | Installed, `rustc --version`/`cargo --version` both work. |
+| `clippy` | `apt-get install -y rust-clippy` (**not** `clippy` or `cargo-clippy` - the Debian/Ubuntu package name is `rust-clippy`, or `rust-N.NN-clippy` for a version-pinned toolchain match) | Installed, `cargo clippy --version` works. |
+| `valgrind` | `apt-get install -y valgrind` (Ubuntu main repo) | Installed, ran against a real 40-byte leak, caught it exactly (`definitely lost: 40 bytes in 1 blocks`, correct allocation site). See §11.4. |
+| `cppcheck` | `apt-get install -y cppcheck` (Ubuntu universe repo) | Installed, ran against the same leak with `--enable=all`, caught it independently (`memleak`). See §11.5. |
+
+**Fixed:** `rust_debug/setup.py`'s `SETUP_INSTRUCTIONS`/`CLAUDE_INSTRUCTION`/`REQUIRED_TOOLS` previously led with the `rustup.rs` curl-installer as "Option 1 (Recommended)," which doesn't work in sandboxed Claude environments without that domain allowlisted. Rewrote to lead with apt (verified working here), rustup as an explicit fallback for environments with broader network access, and added a note about the `rust-clippy` package-name gotcha. `cpp_debug/setup.py` and `symbolic_executor.py`'s CBMC/KLEE docstrings were checked and are already accurate (apt-first, KLEE described as heavyweight); no changes needed there.
+
+### 11.3 Real bug found and fixed: `RustDebugger.debug()` reported false confidence when rustc/clippy weren't installed
+
+`BorrowCheckerParser.parse_borrow_checker_output()` and `ClippyLinter.run_clippy()` both correctly detect and record tool availability (`rustc_available`, `clippy_available`) and degrade to empty results when the tool is missing - but `RustDebugger.debug()` in `phases.py` never read either flag. Result: with neither tool installed, it still returned `risk_level=LOW`, `confidence_score=0.95`, summary `"✅ No borrow checker or Clippy violations"` - indistinguishable from a real clean-code result, because no code path ever checked whether an actual check had run. Every other new v2.5.0 module (`dwarf_available`, `cbmc_available`/`klee_available`, `strace_available`, `capstone_available`, `angr_available`) correctly surfaces tool absence to the caller; Rust was the one exception.
+
+**Fixed** in `src/rust_debug/phases.py`, following the same pattern `CppDebugger.debug()` already uses (`confidence_score = 1.0 if diagnostics.get("tool_available") else 0.0`):
+- `phases_executed` now lists only the phases that actually ran (`["static"]` alone if neither tool is present, vs. `["static", "borrow_checker", "clippy"]`), instead of the old hardcoded `["static", "runtime"]`.
+- `confidence_score`: `0.95` only when both tools ran and found nothing (unchanged from before, now honestly earned); `0.8` when real patterns were found (unchanged); `0.4` when only one tool ran; `0.0` when neither ran.
+- `summary` distinguishes four cases explicitly instead of collapsing "no tools ran" into the same string as "tools ran, found nothing": both-available-clean (unchanged text), rustc-only, clippy-only, and neither-available (explicit warning that the result doesn't indicate clean code).
+
+Verified all three states with real tools: installed rustc/cargo/clippy via apt in this sandbox, confirmed `confidence=0.0`+warning with neither installed, `confidence=0.95` clean with both installed and no bug, and `risk=CRITICAL` correctly caught on a real use-after-move borrow violation with both installed.
+
+### 11.4 New: valgrind (memcheck) integration into `c_debug` - DONE
+
+Added `ValgrindRunner`/`ValgrindReport`/`valgrind_available()` to `src/c_debug/debugger.py`, wired into `CDebugger.debug()` alongside the existing `SyscallTracer`, plus a new `CDebugger.valgrind_only()` convenience method mirroring `strace_only()`. This closes a real capability gap: `cpp_debug`/`c_debug` previously had static analysis (Clang, CSA) + DWARF + strace, but nothing that instruments actual memory accesses at runtime - so leaks, heap buffer overflow/underflow, use-after-free, invalid/double-free, and uninitialised-value use could all pass silently.
+
+Output parsing uses valgrind's default text-mode stderr output (headline + call-stack frame lines), classified into `BugPattern`s with severity mapping (definite leak/invalid read/write/free → HIGH/CRITICAL, possible/indirect leak/uninitialised → MEDIUM). **One parsing bug found and fixed during testing:** the initial version matched "indirectly lost"/"possibly lost" as substrings anywhere in the output, which false-positived on valgrind's own `LEAK SUMMARY:` aggregate section (e.g. `indirectly lost: 0 bytes in 0 blocks` - a *summary line with a zero count*, not a finding). Fixed by requiring the actual per-error headline format (`"N bytes in M blocks are ... lost"`) and stopping the parse loop once the `LEAK SUMMARY:`/`ERROR SUMMARY:` section begins.
+
+Verified against four real programs (leak, clean, heap buffer overflow, double-free) - each parses to the correct `BugPattern`(s) with the correct source location, and the clean program produces zero false positives. Verified end-to-end through `CDebugger.debug()` (not just `ValgrindRunner` standalone): a real leak now surfaces as `risk_level=HIGH`, findings from both the CSA static analyzer and valgrind together.
+
+### 11.5 New: cppcheck integration into `cpp_debug` - DONE
+
+Added `src/cpp_debug/cppcheck_analyzer.py` (`CppcheckAnalyzer`, `cppcheck_available()`), wired into `CppDebugger.debug()` as an additional detection pass merged via the existing `classifier.merge_and_dedupe()`. Rationale: cppcheck uses dataflow-based analysis rather than CSA's path-sensitive AST diagnostics, so it's a genuinely different (only partially overlapping) detector, not a duplicate of Clang's own `--analyze`. Uses cppcheck's `--xml --xml-version=2` output (parsed via `xml.etree.ElementTree`) rather than regex-parsing human-readable text, for the same stability reason CBMC/valgrind parsing elsewhere in this suite favors well-defined formats. A curated `_CRITICAL_IDS` set (`memleak`, `doubleFree`, `useAfterFree`, `nullPointer`, `arrayIndexOutOfBounds`, `bufferAccessOutOfBounds`, `uninitvar`) promotes cppcheck's own severity for these specific checks to CRITICAL, matching how the same bug classes are treated elsewhere in the suite (valgrind, CSA).
+
+Verified against the same real leak used in §11.4: caught independently as `cppcheck_memleak` at the correct line, alongside (not duplicating) the CSA-derived `memory_leak` finding from `_design_review`/CSA - `merge_and_dedupe`'s `(location, pattern_type)` dedup key correctly treats these as distinct findings since `pattern_type` differs, which is the intended "second opinion" behavior rather than silent duplication.
+
+### 11.6 Real bug found, FIXED this session (was documented-but-not-fixed as of v2.6.0): three separate `RiskLevel` enum classes
+
+**Status update: fixed.** The original write-up of this finding (unchanged below for the record) recommended "pick `common.interop.RiskLevel` as canonical... and re-verify `MasterDebuggerV5`'s own risk classification logic still round-trips correctly." Did exactly that:
+
+- `src/master_debugger/types.py`: removed its own lowercase-valued `RiskLevel(Enum)` definition, now imports `RiskLevel` from `..common.interop`. `orchestrator_v5.py`, `phases.py`, and `master_debugger/__init__.py` all import `RiskLevel` from `.types`, so they picked up the canonical class with no changes needed to those files. Checked every use of `.value` and dict/pattern-matching logic in `orchestrator_v5.py` (`classify_risk()`, `select_phases()`, `_calculate_metrics()`) first - all identity-based (`RiskLevel.CRITICAL` member comparisons and dict keys), none depended on the actual string casing, so this was safe.
+- `src/master_debugger/orchestrator.py` (see new finding below - this turned out to be **dead code**, not a live call path) had its own *third* `RiskLevel(str, Enum)` definition. Fixed for consistency (zero behavioral risk, since nothing imports this module).
+- **One real test had to be updated, not just left alone:** `src/tests/test_integration.py::test_critical_code_full_workflow` asserted `report.risk_level.value == 'critical'` (lowercase) - this is the exact place the old, now-removed lowercase value was being relied upon. Updated to `'CRITICAL'` with an inline note explaining why the value changed. This is a deliberate, understood behavior change verified against the fix, not a silent regression - confirmed by grep across `tests/`/`src/*/tests/` that no other test depends on lowercase risk-value strings.
+- Verified end-to-end: `src.RiskLevel is common.interop.RiskLevel` (literally the same class object now), `RustDebugger`/`CDebugger`/`CppDebugger`/`AssemblyDebugger` reports compare correctly against `src.RiskLevel.X`, and `MasterDebuggerV5.debug()`'s own classification round-trips correctly (tested against real critical-risk code, produces `risk_level=CRITICAL`, summary text now reads "Risk: CRITICAL" instead of "Risk: critical" - cosmetic, not a behavior change, since that string was only ever used for a human-readable summary, never parsed back).
+- Full pytest suite re-run after the fix: **359 passed, 1 deselected, 0 failed** - identical pass count to before the fix, confirming no new regressions from the unification.
+
+Original finding (kept for the record, now resolved):
+
+There are three independent `RiskLevel` enum definitions in the codebase:
+
+| Location | Values |
+|---|---|
+| `src/common/interop.py` | `"CRITICAL"`, `"HIGH"`, `"MEDIUM"`, `"LOW"` (uppercase) |
+| `src/master_debugger/types.py` | `"critical"`, `"high"`, `"medium"`, `"low"` (lowercase) |
+| `src/master_debugger/orchestrator.py` | a third `class RiskLevel(str, Enum)` definition |
+
+`src/__init__.py`'s top-level `RiskLevel` export (unchanged from the original v1.0.0 file - `from src.master_debugger.orchestrator_v5 import ..., RiskLevel, ...`) is `master_debugger.types.RiskLevel`. But `RustDebugger`, `CppDebugger`, `CDebugger`, and `AssemblyDebugger` all construct their reports via `common.interop.UnifiedDebugReport`, so their `.risk_level` attribute is actually a `common.interop.RiskLevel` instance. Both print identically (`repr()` → `"RiskLevel.CRITICAL"`), so this is invisible in casual testing/logging, but `==` silently fails across the two classes - `report.risk_level == src.RiskLevel.CRITICAL` is `False` even when the report genuinely is critical, if `report` came from any of the four language-specific debuggers rather than `MasterDebuggerV5`.
+
+This is exactly the failure mode the suite's own `CHANGELOG.md` 2.2.2 entry already describes and partially fixed (`master_debugger/orchestrator.py`'s `_phase_2_formal()` comparing "two *different* `RiskLevel` enums... which silently fail equality checks since they're different classes with different values") - but that fix addressed one call site, not the underlying duplication, which is why it resurfaced here in a different call path (the new top-level `__init__.py`'s public API surface, exercised by any downstream code doing `from src import RiskLevel` and comparing against a per-language debugger's report).
+
+### 11.7 New finding while fixing 11.6: `master_debugger/orchestrator.py`'s `MasterDebugger` class is dead code, and may be a more capable v6 that was never wired in
+
+While tracing every `RiskLevel` usage to fix §11.6, found that `src/master_debugger/orchestrator.py` defines a `MasterDebugger` class (374 lines, module docstring says "Master-Debugger v6 4-phase orchestration with PyProver integration") that is **not imported anywhere in `src/` or `tests/`** - confirmed by `grep -rln "MasterDebugger\b"` across the whole tree, only the defining file itself matches. The only `MasterDebugger` actually wired into `src/__init__.py` and exercised by the test suite is `MasterDebuggerV5` (`orchestrator_v5.py`), whose `classify_risk()` is keyword/pattern matching over the raw code string, with no real per-language dispatch.
+
+`orchestrator.py`'s unused `MasterDebugger`, by contrast, directly imports and calls `RustDebugger`, `CppDebugger`, and `PyProverBridge` (`_phase_2_formal` awaits `invoke_pyprover`), suggesting it's a real, more integrated attempt at formal-verification-aware orchestration that predates or was meant to supersede v5's phase logic - the module docstring's "v6" naming next to a package that otherwise tops out at "v5" in every exported name is itself a signal something didn't get finished or merged.
+
+**Not investigated further or wired in this session** - this is a genuine "which orchestrator is canonical" architecture question (does v6 fully supersede v5, is it tested/working, does merging it change `MasterDebuggerV5`'s public behavior in ways downstream callers depend on) that deserves its own session rather than a decision buried inside a RiskLevel bugfix. Also has its own `UnifiedDebugReport` and `Issue` dataclasses (a *third* independent `UnifiedDebugReport` definition, distinct from `common.interop.UnifiedDebugReport` used everywhere else) - if this class is ever wired in, that duplication needs the same treatment `RiskLevel` just got.
+
+### 11.8 Suggested libraries: status update - bandit, semgrep, and lief now wired in; tree-sitter still not
+
+Original write-up (kept for the record): verified as installable but not wired into any module in the previous session -
+
+- **semgrep**, **bandit** (pip) - multi-language pattern-based static analysis / Python-specific security linting. Could strengthen or partially replace the regex-based `bug_patterns.py` (python_debug) / `bug-patterns.js` (javascript_debug).
+- **lief** (pip) - richer ELF/PE/Mach-O binary parsing than `pyelftools` alone, would strengthen `dwarf_analyzer.py`.
+- **tree-sitter** + **tree-sitter-languages** (pip) - uniform incremental-parser AST access across most of the suite's 12+ target languages, would let structural analysis be shared rather than each module hand-rolling its own text/regex parsing.
+
+**Status: bandit, semgrep, and lief are now all installed, wired in, and verified against real code.** See §11.10-§11.11 (bandit/semgrep) and §11.14 (lief). `tree-sitter` remains uninstalled/unwired - it's a suite-wide parsing-strategy change (touching how every language module represents source structure), not a single-module addition, and wasn't attempted. Confirmed still pip-installable (checked in an earlier session) but not re-verified by installing it.
+
+### 11.9 Real bug found while verifying the bandit fix: `MasterDebuggerV5.debug()` can hang indefinitely if traced code calls `input()`
+
+While testing the bandit fix (§11.11) end-to-end through `MasterDebuggerV5.debug()`, a test using genuinely vulnerable code that happened to include `input()` (`subprocess.call("rm -rf " + input(), shell=True)`) hung the sandbox past a 60s command timeout. Isolated by removing the `input()` call, which resolved it immediately - `MasterDebuggerV5`'s Phase 1 (`Phase1RuntimeDebug`) genuinely *executes* the traced code (this is how `python_debug`'s execution-tracing approach works - it's not purely static), and in this sandboxed environment there's no interactive stdin, so `input()` blocks forever waiting for input that will never arrive.
+
+**Not fixed this session** - this is a real, separate finding from anything else in this session's scope (touches `python_debug`'s core execution engine, not Phase 0/RiskLevel/the new analyzer modules), and a proper fix needs a design decision: wrap traced execution with a timeout (kills the process but loses partial trace data), monkeypatch/mock `input()` to return a sentinel value during tracing (changes program behavior, could mask real bugs downstream of the `input()` call), or redirect stdin from `/dev/null` (fails fast with `EOFError` instead of hanging, probably the least invasive option, but changes what exception the traced code raises compared to real interactive use). Recorded here as a concrete finding for a future session rather than a guessed fix under time pressure. Reproduction:
+
+```python
+import src
+md = src.MasterDebuggerV5()
+report = md.debug("x = input('enter something: ')\nprint(x)\n")  # hangs indefinitely, no timeout
+```
+
+### 11.10 Real bug found and fixed: bandit was already wired into `Phase0StaticAnalysis`, but its detection check never matched real bandit output
+
+Similar to CBMC/cppcheck in §11.9 - this wasn't a missing feature, it was dormant, broken code that had apparently never been exercised against a real bandit install. `master_debugger/phases.py`'s `Phase0StaticAnalysis.run()` already called `bandit` via subprocess and had a `StaticAnalysisResult.bandit_warnings` field ready to receive results - but the check `if 'WARNING' in output.stdout or 'SEVERITY' in output.stdout` never matches real bandit 1.9.4 text output, which says `"Severity:"` (mixed case) and `"Issue:"`, never the all-caps strings this checked for. Combined with the existing `except (subprocess.TimeoutExpired, FileNotFoundError): pass`, "bandit isn't installed" and "bandit ran and found nothing" were indistinguishable - and since bandit was apparently never installed in whatever environment last touched this code, real security findings were silently discarded on every single run.
+
+Installed bandit 1.9.4 via pip, confirmed the broken match against genuinely vulnerable code (hardcoded password + `subprocess.call(..., shell=True)` - both textbook bandit findings, B105/B602, neither surfaced). Fixed by switching to `bandit -f json` for structured, stable parsing (same rationale as cppcheck's `--xml` and the general pattern established this session: don't regex-match human-readable tool output when a structured format is available). Verified: real findings now surface correctly (`[B404]`, `[B105]`, `[B602]` with correct severity and line numbers), zero false positives on clean code, and the fix round-trips through `MasterDebuggerV5.debug()` end-to-end. mypy and pylint's existing wiring in the same function were checked too and both already work correctly against real installs (mypy 2.2.0, pylint 4.0.6) - only bandit's match condition was broken.
+
+### 11.11 New: semgrep integration into `Phase0StaticAnalysis` - DONE, with real constraints found and worked around
+
+Added `src/common/semgrep_analyzer.py` (`SemgrepAnalyzer`, `semgrep_available()`), wired into `Phase0StaticAnalysis.run()` alongside mypy/pylint/bandit, plus a new `StaticAnalysisResult.semgrep_findings` field. Rationale: semgrep's checks are declarative pattern rules from a different rule-authoring lineage than bandit's hand-coded AST visitors, so it's a genuine "second opinion" in the same spirit as `CppcheckAnalyzer` alongside Clang (§11.5), not a duplicate.
+
+Two real constraints discovered and worked around, not just installed-and-done:
+
+1. **`semgrep --config auto` (and any `p/`/`r/` registry config) requires network access to `semgrep.dev`, which returned `HTTP 403` when tested from this sandbox.** The suite's network allowlist covers `github.com`/`codeload.github.com` but not `semgrep.dev`. Worked around by downloading the `semgrep/semgrep-rules` repository directly from GitHub as a tarball (same pattern as the CBMC `.deb` GitHub-release download in the previous session) and bundling a rule subset directly in the skill package at `src/common/semgrep_rules/`, with a `README.md` there documenting provenance, license (Semgrep Rules License v1.0, copied verbatim), and how to refresh/expand the bundled rules. `SemgrepAnalyzer` always points `--config` at this local directory, never at a registry shorthand.
+
+2. **Rule-compilation overhead scales with rule count and is significant**: the full `python/lang/security/` subset (91 rules) took ~17s per scan regardless of input size (measured via direct timing, not estimated) - far past the ~5-10s budget every other Phase 0 tool uses, and with no caching benefit on repeated runs. Trimmed to a curated 20-rule subset (~6-7s per scan) covering distinct threat categories with minimal overlap with bandit: command injection, unsafe eval/exec, unsafe deserialization, SQL injection, XXE, weak crypto, TLS/cert issues, ReDoS, reverse shells, credential handling. Verified detection still works across 4 of these categories against genuinely vulnerable code (`pickle.loads`, `hashlib.md5`, `eval()`, catastrophic-backtracking regex) with zero false positives on clean code, before finalizing the trimmed set - the full rationale and category list is in `semgrep_rules/README.md`.
+
+**Known tradeoff, not fully resolved:** even at 20 rules, semgrep adds a fixed ~6-8s to every `Phase0StaticAnalysis.run()` call (subprocess startup + rule compilation dominate, not the actual scan), regardless of code size. This is a real, noticeable latency cost for interactive use, and it roughly 4-6x'd the formal pytest suite's total runtime (from ~10-17s to ~60s, since `test_orchestration.py`/`test_integration.py` call `MasterDebuggerV5.debug()`/`Phase0StaticAnalysis.run()` multiple times each). Not addressed this session - options for a future pass: make semgrep opt-in via a parameter rather than always-on, investigate `semgrep --time` profiling to see if rule-compilation can be cached across invocations (e.g. a long-lived `semgrep` daemon mode, if one exists), or trim the rule count further. Flagging honestly rather than leaving this as a silent regression.
+
+Full pytest suite re-run after both §11.11 and §11.12: **359 passed, 1 deselected, 0 failed** (same pass count as before - the ~50s slowdown is real but did not break anything).
+
+### 11.12 Two more real bugs found by actually running the formal pytest suite (both fixed, previous session)
+
+Running `pytest tests/ src/ -q` after §11.1-11.5's changes surfaced 2 failures out of 359 collected tests. Neither was caused by that session's edits, but both were only reachable because that session installed cppcheck and CBMC for the first time (see §11.2) - the relevant tests are `@pytest.mark.skipif`-gated on tool availability and had presumably never run against a real toolchain in whatever environment last produced the "355/355 passing" CHANGELOG figure.
+
+**Bug A - self-inflicted, fixed immediately (see §11.5):** the new `CppcheckAnalyzer`'s own `--suppress=missingIncludeSystem` flag generated a benign `unmatchedSuppression` info-level finding on trivial code with no includes, which the *existing, unchanged* risk classifier (`elif all_patterns: risk = MEDIUM`) treated the same as a real finding - pushing `test_debug_clean_code_low_risk` from LOW to MEDIUM. Fixed by also suppressing `unmatchedSuppression` itself.
+
+**Bug B - pre-existing, unrelated to this session's other work, fixed:** `TestCBMCIntegration::test_div_zero_detected` failed because `CBMCDriver.BASE_FLAGS` in `symbolic_executor.py` used `--null-pointer-check` and `--overflow-check`, which CBMC 6.x renamed/split (`--pointer-check`, `--signed-overflow-check` + `--unsigned-overflow-check`). This is a hard CLI usage error in CBMC 6.x, not a soft deprecation - CBMC refuses to run *any* check and prints its help text instead. Because `_parse_cbmc_output` correctly finds zero matching lines in help text, `SymbolicExecutor` was reporting `cbmc_ran=True` with zero findings for every single input on any CBMC 6.x install, indistinguishable from "ran cleanly, no bugs found." The one test that would have caught this either way (`test_safe_program_no_findings`, asserting zero findings on safe code) couldn't distinguish "correctly found nothing" from "silently never checked anything," which is exactly why `test_div_zero_detected` (asserting a finding *is* produced on genuinely broken code) is the test that actually caught it.
+
+Fixed by updating `BASE_FLAGS` to the CBMC 6.x flag names, verified against the real installed CBMC 6.10.0 with a manual `--unwind 5 --bounds-check --div-by-zero-check --pointer-check --signed-overflow-check --unsigned-overflow-check --pointer-overflow-check --memory-leak-check` invocation before touching the source, confirming it now catches a real division-by-zero (`division-by-zero.1 ... FAILURE`).
+
+**This means the "355/355 passing" figure in `CHANGELOG.md`'s v2.5.0-era entries was never exercising CBMC or cppcheck against a real toolchain** - both are gated `skipif(not tool_available())`, and if neither was installed in whatever environment produced that number, the entire CBMC integration path (all of Phase 6's CBMC half) could have been silently broken for an unknown number of releases without any test failure signal. Worth a note for whoever next touches this suite: **installing the optional tools and re-running the suite is not just "nice to have" coverage, it's the only way several of these integration paths get exercised at all.** (This lesson repeated itself twice more in the same-day follow-up session - see §11.10's bandit finding and the CBMC pattern is structurally identical.)
+
+### 11.14 New: lief integration into `cpp_debug` - DONE, with a self-inflicted classifier regression found and fixed
+
+Added `src/cpp_debug/lief_analyzer.py` (`LiefBinaryAnalyzer`, `lief_available()`), wired into `CppDebugger.debug()`. Deliberately **not** a replacement for `pyelftools` in `dwarf_analyzer.py` - the two serve different purposes. `pyelftools`' DWARF module walks compiler-emitted debug info (DIEs) to recover variable types/locations/pointer-escape patterns; lief doesn't have comparable DWARF depth. What lief is actually good at, and what `DWARFAnalyzer` doesn't check at all, is binary-format-level hardening posture (PIE/NX/RELRO/stack-canary) and the imported-symbol table - flagging use of classically dangerous libc functions (`system`, `strcpy`, `gets`, ...) straight from a compiled binary's import table, without needing source access. Verified both directions with real compiled binaries: PIE/NX/RELRO/stack-canary detection toggles correctly between a default build and one deliberately weakened with `-fno-stack-protector -Wl,-z,norelro`, and dangerous imports (`system`, `strcpy`) are correctly listed from a real binary's own import table.
+
+**Self-inflicted bug found and fixed during verification**, same pattern as the cppcheck `unmatchedSuppression` regression in §11.9's Bug A: the `missing_stack_canary` hardening finding is real and accurate (this sandbox's `clang` genuinely doesn't enable stack-protector by default, unlike `gcc`), but it's a property of the compiler/linker flags used, not of the code's content - it fires on essentially *any* input compiled the same way, including the formal test suite's trivial `int main() { return 0; }` clean-code case. The existing, unchanged risk classifier (`elif all_patterns: risk = MEDIUM`) doesn't distinguish "any finding" from "a finding that actually says something about this code," so `test_debug_clean_code_low_risk` regressed from LOW to MEDIUM exactly the same way it did with cppcheck's suppression noise.
+
+**Fix, more structural than the cppcheck one:** split `LiefBinaryAnalyzer.analyze()` into two channels via an `include_hardening` parameter - dangerous-import findings (a real property of what the code does: does it call `system()`/`strcpy()`) vs. hardening-posture findings (a toolchain-constant property, not code-content-dependent). `CppDebugger.debug()`'s automatic pipeline calls `analyze(code, include_hardening=False)`, so only dangerous-import findings feed the shared risk classifier. The full hardening audit (all four checks) is still available by calling `LiefBinaryAnalyzer().analyze(code, include_hardening=True)` directly - nothing was removed, just kept out of the path that drives automatic per-code risk scoring. Verified all three states after the fix: clean code → `LOW` risk with zero patterns; vulnerable code (`strcpy`+`system`) → `CRITICAL` risk with `dangerous_import_system`/`dangerous_import_strcpy` correctly present; direct full-audit call on clean code still surfaces `missing_stack_canary` for anyone who wants the complete hardening picture.
+
+Full pytest suite re-run after the fix: **359 passed, 1 deselected, 0 failed** - same count as before lief was added, confirming the fix fully resolved the regression with no other side effects.
+
+
+
+### 11.15 Final version/test-suite state after all sessions
+
+`src/__init__.py`: v2.6.1, 61 exports. `c_debug/__init__.py`: v1.1.0. `cpp_debug/__init__.py`: v1.4.0. `master_debugger/types.py`: `RiskLevel` now imports from `common.interop` (§11.6) rather than defining its own. `master_debugger/phases.py`: bandit fixed, semgrep added (§11.9-11.10). New files: `common/semgrep_analyzer.py` + bundled `common/semgrep_rules/` (20 curated rules, 108KB); `cpp_debug/lief_analyzer.py` (§11.14).
+
+Ad-hoc smoke test (not part of `tests/`, used across both sessions to verify changes against real installed tools): 20/20 passing.
+
+**Formal `tests/`+`src/` pytest suite: 359 passed, 1 deselected, 0 failed** (`python -m pytest tests/ src/ -q`), confirmed after every change across all sessions, most recently after the lief integration and fix (§11.14) - same pass count throughout every single change in this document, confirming no regressions were introduced by any of this work. Full suite runtime increased from ~10-17s to ~50-70s due to semgrep's per-invocation overhead (§11.11) - a real, disclosed tradeoff, not a silent one. The 1 deselected item is a pre-existing marker-based exclusion, not investigated (out of scope).
+
+**Summary of what's fixed vs. what remains, across all sessions:**
+
+| Item | Status |
+|---|---|
+| `src/__init__.py` empty | Fixed |
+| `test_generator` broken import | Fixed |
+| `RustDebugger` false-confidence | Fixed |
+| CBMC 6.x flag incompatibility | Fixed |
+| cppcheck suppression false-positive | Fixed |
+| Three `RiskLevel` enum classes | Fixed |
+| bandit detection never matching | Fixed |
+| lief hardening-posture false "risk" on any input | Fixed |
+| valgrind integration | Added |
+| cppcheck integration | Added |
+| semgrep integration | Added |
+| lief integration | Added |
+| `MasterDebugger` v6 dead code / 3rd `UnifiedDebugReport` | Found, not fixed (needs its own session) |
+| `input()` hang in `MasterDebuggerV5.debug()` | Found, not fixed (needs a design decision) |
+| KLEE unavailable | Documented, not fixable in this environment |
+| `tree-sitter` | Documented, not attempted |
+| semgrep's ~6-8s per-call overhead | Documented, not resolved |

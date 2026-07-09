@@ -97,9 +97,14 @@ def generate_tests(
     if include_fixtures:
         fixtures = generate_fixtures(metadata)
     
-    # Phase 7: Format test code
+    # Phase 6b: Infer expected outputs by executing the function where safe
+    func_name_str = metadata.get("name", "unknown")
     all_tests = test_cases + metamorphic_tests + fuzzing_tests + red_team_tests
-    test_code = format_tests(all_tests, language, fixtures)
+    if language == "python":
+        all_tests = _infer_expected_outputs(all_tests, code, func_name_str)
+
+    # Phase 7: Format test code
+    test_code = format_tests(all_tests, language, fixtures, func_name=func_name_str)
     
     # Phase 8: Generate recommendations
     recommendations = generate_recommendations(mutation_report, coverage_report)
@@ -784,16 +789,79 @@ def generate_fixtures(metadata: Dict) -> List[str]:
     return fixtures
 
 
-def format_tests(test_cases: List[TestCase], language: str, fixtures: List[str]) -> str:
+def _infer_expected_outputs(test_cases: List[TestCase], code: str, func_name: str) -> List[TestCase]:
+    """Execute the function with each test case's inputs and capture the output.
+
+    Only runs on test cases whose expected_output is None and whose test_type
+    is not a red_team type (those are adversarial — we deliberately don't
+    pre-approve their outputs). Times out per call and skips on any exception
+    so that a crashing or infinite-looping function never breaks test generation.
+    """
+    import signal as _signal
+
+    # Build an isolated namespace and exec the function definition
+    ns: Dict[str, Any] = {}
+    try:
+        exec(compile(code, "<generated>", "exec"), ns)  # noqa: S102
+    except Exception:
+        return test_cases  # Can't compile — skip inference entirely
+
+    if func_name not in ns or not callable(ns[func_name]):
+        return test_cases
+
+    fn = ns[func_name]
+    ADVERSARIAL_TYPES = {"red_team_dos", "red_team_bypass", "red_team_state_corruption"}
+    TIMEOUT_SEC = 2
+
+    def _run_with_timeout(fn, kwargs):
+        """Call fn(**kwargs) with a hard timeout; return (result, ok)."""
+        result_box = [None, False]
+
+        def _handler(signum, frame):
+            raise TimeoutError()
+
+        old = _signal.signal(_signal.SIGALRM, _handler)
+        _signal.alarm(TIMEOUT_SEC)
+        try:
+            result_box[0] = fn(**kwargs)
+            result_box[1] = True
+        except Exception:
+            pass
+        finally:
+            _signal.alarm(0)
+            _signal.signal(_signal.SIGALRM, old)
+        return result_box[0], result_box[1]
+
+    updated = []
+    for tc in test_cases:
+        if tc.expected_output is not None or tc.test_type in ADVERSARIAL_TYPES or not tc.inputs:
+            updated.append(tc)
+            continue
+        try:
+            val, ok = _run_with_timeout(fn, tc.inputs)
+            if ok:
+                tc = TestCase(
+                    name=tc.name,
+                    inputs=tc.inputs,
+                    expected_output=val,
+                    test_type=tc.test_type,
+                )
+        except Exception:
+            pass
+        updated.append(tc)
+    return updated
+
+
+def format_tests(test_cases: List[TestCase], language: str, fixtures: List[str], func_name: str = "") -> str:
     """Format test cases as executable pytest/jest code."""
     if language == "python":
-        return _format_pytest(test_cases, fixtures)
+        return _format_pytest(test_cases, fixtures, func_name=func_name)
     elif language == "javascript":
-        return _format_jest(test_cases, fixtures)
+        return _format_jest(test_cases, fixtures, func_name=func_name)
     return ""
 
 
-def _format_pytest(test_cases: List[TestCase], fixtures: List[str]) -> str:
+def _format_pytest(test_cases: List[TestCase], fixtures: List[str], func_name: str = "") -> str:
     """Generate pytest-formatted test code."""
     lines = []
     
@@ -819,10 +887,11 @@ def _format_pytest(test_cases: List[TestCase], fixtures: List[str]) -> str:
         
         # Generate test body based on inputs
         if test_case.inputs:
-            # Build function call
-            func_name = test_case.name.replace("test_", "").split("_")[0]
+            # Use the canonical function name passed in; fall back to naive
+            # extraction only if not provided (preserves backward compatibility).
+            call_name = func_name if func_name else test_case.name.replace("test_", "").split("_")[0]
             args = ", ".join(f"{k}={_format_value(v)}" for k, v in test_case.inputs.items())
-            lines.append(f"    result = {func_name}({args})")
+            lines.append(f"    result = {call_name}({args})")
             
             # Add assertion placeholder
             if test_case.expected_output is not None:
@@ -839,7 +908,7 @@ def _format_pytest(test_cases: List[TestCase], fixtures: List[str]) -> str:
     return "\n".join(lines)
 
 
-def _format_jest(test_cases: List[TestCase], fixtures: List[str]) -> str:
+def _format_jest(test_cases: List[TestCase], fixtures: List[str], func_name: str = "") -> str:
     """Generate Jest-formatted test code."""
     lines = []
     
@@ -867,9 +936,9 @@ def _format_jest(test_cases: List[TestCase], fixtures: List[str]) -> str:
         lines.append(f"  test('{test_name}', () => {{")
         
         if test_case.inputs:
-            func_name = test_case.name.replace("test_", "").split("_")[0]
+            call_name = func_name if func_name else test_case.name.replace("test_", "").split("_")[0]
             args = ", ".join(f"{_format_value(v)}" for v in test_case.inputs.values())
-            lines.append(f"    const result = {func_name}({args});")
+            lines.append(f"    const result = {call_name}({args});")
             
             if test_case.expected_output is not None:
                 lines.append(f"    expect(result).toBe({_format_value(test_case.expected_output)});")
@@ -968,7 +1037,42 @@ def generate_red_team_tests(metadata: Dict, code: str) -> tuple:
     func_name = metadata["name"]
     params = metadata.get("params", [])
     docstring = (metadata.get("docstring", "") or "").lower()
-    
+    source = metadata.get("source", code)
+
+    # Code-pattern analysis: scan the actual source for dangerous constructs so
+    # that red team triggers fire based on what the code *does*, not just its name.
+    _uses_eval_exec = "eval(" in source or "exec(" in source
+    _uses_open = "open(" in source
+    _processes_strings = any("str" in (p.get("type", "") or "").lower() for p in params)
+
+    # Category 0: eval/exec injection — always generate when source uses eval/exec
+    if _uses_eval_exec and params:
+        injection_payloads = [
+            "__import__('os').system('id')",
+            "'; import os; os.system('id')",
+            "${7*7}",
+        ]
+        for i, payload in enumerate(injection_payloads):
+            tests.append(TestCase(
+                name=f"test_{func_name}_red_team_eval_injection_{i}",
+                inputs={params[0]["name"]: payload},
+                expected_output=None,
+                test_type="red_team_bypass",
+            ))
+        report["categories"]["eval_injection"] = len(injection_payloads)
+        report["risk_areas"].append("Function uses eval()/exec() — injection risk")
+
+    # Category 0b: path traversal for functions that open files
+    if _uses_open and _processes_strings and params:
+        tests.append(TestCase(
+            name=f"test_{func_name}_red_team_path_traversal",
+            inputs={params[0]["name"]: "../../../etc/passwd"},
+            expected_output=None,
+            test_type="red_team_bypass",
+        ))
+        report["categories"]["path_traversal"] = 1
+        report["risk_areas"].append("Function uses open() — path traversal risk")
+
     # Category 1: Deep Nesting / Stack Overflow Tests
     if "paren" in docstring or "bracket" in docstring or "nest" in docstring or func_name in ["validate", "parse"]:
         tests.append(TestCase(

@@ -18,6 +18,10 @@ from ..common.interop import (
 from .diagnostics import DiagnosticsCompiler, clang_available
 from .analyzer import StaticAnalyzer
 from .classifier import CppBugPatternClassifier
+from .dwarf_analyzer import DWARFAnalyzer
+from .symbolic_executor import SymbolicExecutor
+from .cppcheck_analyzer import CppcheckAnalyzer
+from .lief_analyzer import LiefBinaryAnalyzer
 
 
 class CppDebugger:
@@ -33,6 +37,10 @@ class CppDebugger:
         self.compiler = DiagnosticsCompiler()
         self.analyzer = StaticAnalyzer()
         self.classifier = CppBugPatternClassifier()
+        self.dwarf = DWARFAnalyzer()
+        self.symbolic = SymbolicExecutor()
+        self.cppcheck = CppcheckAnalyzer()
+        self.lief_analyzer = LiefBinaryAnalyzer()
 
     def debug(self, code: str, dialect: str = "c") -> UnifiedDebugReport:
         """
@@ -63,8 +71,35 @@ class CppDebugger:
         # Phase 3: lightweight design review (unsafe API usage, raw new/delete)
         design_patterns = self._design_review(code, dialect)
 
+        # Phase 5: DWARF memory-layout analysis (compiled binary inspection)
+        dwarf_report = self.dwarf.analyze_source(code, dialect=dialect)
+        dwarf_patterns = dwarf_report.to_bug_patterns(
+            language=LanguageType.CPP if dialect == "cpp" else LanguageType.C
+        )
+
+        # Phase 6: CBMC/KLEE symbolic execution (exhaustive path analysis)
+        sym_report = self.symbolic.run(code, dialect=dialect)
+        sym_patterns = sym_report.to_bug_patterns(
+            language=LanguageType.CPP if dialect == "cpp" else LanguageType.C
+        )
+
+        # Cppcheck: dataflow-based second opinion alongside Clang diagnostics/CSA
+        cppcheck_patterns = self.cppcheck.analyze(code, dialect=dialect)
+
+        # lief: dangerous-import detection, straight from the compiled binary -
+        # a capability none of the source-level analyzers above have. Binary
+        # hardening posture (NX/PIE/RELRO/stack-canary) is deliberately
+        # excluded here (include_hardening=False): those are properties of
+        # the compiler/linker flags used, not of what this specific code
+        # does, and would otherwise trip the risk classifier below on nearly
+        # every input regardless of content. Call
+        # LiefBinaryAnalyzer().analyze(code, include_hardening=True) directly
+        # for the full hardening audit.
+        lief_patterns = self.lief_analyzer.analyze(code, dialect=dialect, include_hardening=False)
+
         all_patterns = self.classifier.merge_and_dedupe(
-            diag_patterns + analyzer_patterns + design_patterns
+            diag_patterns + analyzer_patterns + design_patterns + dwarf_patterns
+            + sym_patterns + cppcheck_patterns + lief_patterns
         )
         report.patterns_detected = all_patterns
 

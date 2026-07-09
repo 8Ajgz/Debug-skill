@@ -1,13 +1,11 @@
-"""PyProver v14.0 - Formal code verification with Z3 SMT solver"""
+"""PyProver v14.1 - Formal code verification with Z3 SMT solver"""
 try:
     from .contract_verifier import ContractVerifier
     from .async_verifier import AsyncVerifier
     from .ffi_verifier import FFIVerifier
+    from .loop_verifier import LoopVerifier, extract_loop_invariants, LoopVerificationReport
+    from .contract_simplifier import ContractSimplifier, simplify_parsed_contract, ContractSimplificationResult
 
-    # Module-level singletons for convenience access (e.g. `pyprover.async_verifier`).
-    # NOTE: previous versions tried `from .async_verifier import async_verifier`,
-    # but async_verifier.py only defines the AsyncVerifier class, not an instance -
-    # that import always raised ImportError and silently emptied __all__.
     async_verifier = AsyncVerifier()
     ffi_verifier = FFIVerifier()
 
@@ -15,14 +13,24 @@ try:
         'ContractVerifier', 'verify_contract',
         'AsyncVerifier', 'async_verifier',
         'FFIVerifier', 'ffi_verifier',
+        'LoopVerifier', 'extract_loop_invariants', 'LoopVerificationReport',
+        'ContractSimplifier', 'simplify_parsed_contract', 'ContractSimplificationResult',
     ]
 except ImportError:
     __all__ = []
 
-__version__ = "14.0"
+__version__ = "14.1"
 
-# Convenience function
+# Convenience functions
 def verify_contract(code: str, language: str = "python"):
     """Verify contract using formal methods"""
     verifier = ContractVerifier()
     return verifier.verify_contract(code)
+
+def verify_loop_invariants(code: str, param_names=None):
+    """Verify all loop invariants annotated in code. Returns a LoopVerificationReport."""
+    return LoopVerifier().verify_source(code, param_names=param_names or [])
+
+def simplify_contract(requires, ensures, timeout_ms=3000):
+    """Simplify a contract's requires/ensures lists. Returns ContractSimplificationResult."""
+    return simplify_parsed_contract(requires, ensures, timeout_ms=timeout_ms)

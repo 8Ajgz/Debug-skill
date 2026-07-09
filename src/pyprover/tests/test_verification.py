@@ -218,3 +218,110 @@ class TestAsyncConcurrentVariableDetection:
         )
         concurrent = async_verifier.detect_concurrent_variables(code, "python")
         assert "counter" in concurrent
+
+
+# ============================================================================
+# Loop Verifier tests
+# ============================================================================
+
+class TestLoopVerifier:
+    """Tests for the new LoopVerifier component."""
+
+    def test_extract_no_invariants(self):
+        from pyprover.loop_verifier import extract_loop_invariants
+        code = "def f():\n    x = 0\n    while x < 10:\n        x += 1"
+        assert extract_loop_invariants(code) == []
+
+    def test_extract_python_comment(self):
+        from pyprover.loop_verifier import extract_loop_invariants
+        code = "# Invariant: i >= 0\nx = 0"
+        invs = extract_loop_invariants(code)
+        assert len(invs) == 1
+        assert invs[0].expression == "i >= 0"
+
+    def test_extract_inv_shorthand(self):
+        from pyprover.loop_verifier import extract_loop_invariants
+        code = "# Inv: i <= n"
+        invs = extract_loop_invariants(code)
+        assert len(invs) == 1
+        assert invs[0].expression == "i <= n"
+
+    def test_verify_source_no_z3_graceful(self, monkeypatch):
+        import pyprover.loop_verifier as lv
+        monkeypatch.setattr(lv, "Z3_AVAILABLE", False)
+        from pyprover.loop_verifier import LoopVerifier
+        report = LoopVerifier().verify_source("# Invariant: i >= 0\nx = 0")
+        assert not report.z3_available
+        assert "Z3 not available" in report.summary()
+
+    def test_verify_sat_invariant(self):
+        from pyprover.loop_verifier import LoopVerifier
+        code = "# Invariant: i >= 0\nx = 0"
+        report = LoopVerifier().verify_source(code, param_names=["n"])
+        # i >= 0 is satisfiable, so INIT should hold
+        if report.z3_available and report.invariants_found > 0:
+            assert report.results[0].init_holds
+
+    def test_verify_unsat_invariant(self):
+        from pyprover.loop_verifier import LoopVerifier
+        # i >= 0 and i < 0 simultaneously — always false
+        code = "# Invariant: i >= 0 and i < 0"
+        report = LoopVerifier().verify_source(code, param_names=[])
+        if report.z3_available and report.invariants_found > 0:
+            # UNSAT invariant: init_holds should be False
+            assert not report.results[0].init_holds
+
+    def test_report_summary_no_invariants(self):
+        from pyprover.loop_verifier import LoopVerifier
+        report = LoopVerifier().verify_source("x = 1")
+        assert "No loop invariants found" in report.summary()
+
+
+# ============================================================================
+# Contract Simplifier tests
+# ============================================================================
+
+class TestContractSimplifier:
+    """Tests for the new ContractSimplifier component."""
+
+    def test_empty_contract(self):
+        from pyprover.contract_simplifier import ContractSimplifier
+        result = ContractSimplifier().simplify([], [])
+        assert result.original_count == 0
+        assert result.simplified_count == 0
+        assert result.reduction_count == 0
+
+    def test_tautology_removed(self):
+        from pyprover.contract_simplifier import ContractSimplifier
+        result = ContractSimplifier().simplify(["True"], [])
+        if result.z3_available:
+            assert "True" not in result.simplified_requires
+            assert result.reduction_count >= 1
+
+    def test_non_redundant_kept(self):
+        from pyprover.contract_simplifier import ContractSimplifier
+        result = ContractSimplifier().simplify(["n >= 0", "n < 100"], [])
+        if result.z3_available:
+            # Neither implies the other — both should be kept
+            assert len(result.simplified_requires) == 2
+
+    def test_redundant_removed(self):
+        from pyprover.contract_simplifier import ContractSimplifier
+        # "n >= 0" is implied by "n >= 5" (if n>=5 then n>=0 always)
+        result = ContractSimplifier().simplify(["n >= 0", "n >= 5"], [])
+        if result.z3_available:
+            assert "n >= 0" not in result.simplified_requires
+            assert "n >= 5" in result.simplified_requires
+
+    def test_as_decorators(self):
+        from pyprover.contract_simplifier import ContractSimplifier
+        result = ContractSimplifier().simplify(["n > 0"], ["result > 0"])
+        dec = result.as_decorators()
+        assert "@requires" in dec or "@ensures" in dec or "No contracts" in dec
+
+    def test_summary_no_z3(self, monkeypatch):
+        import pyprover.contract_simplifier as cs
+        monkeypatch.setattr(cs, "Z3_AVAILABLE", False)
+        from pyprover.contract_simplifier import ContractSimplifier, ContractSimplificationResult
+        result = ContractSimplifier().simplify(["n > 0"], [])
+        assert "Z3 not available" in result.summary()

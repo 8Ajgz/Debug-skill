@@ -30,6 +30,11 @@ def connect(host, port):
         report = debugger.debug(code)
         
         # Should identify as critical
+        # NOTE: value was 'critical' (lowercase) before the v2.6.0 RiskLevel
+        # unification (see roadmap.md §11.6/CHANGELOG.md) - master_debugger
+        # used to define its own lowercase-valued RiskLevel, separate from
+        # common.interop.RiskLevel (uppercase) used by every per-language
+        # debugger. Now unified onto common.interop's uppercase values.
         assert report.risk_level.value == 'CRITICAL'
         # Should run multiple phases
         assert len(report.phases_executed) >= 2

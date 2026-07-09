@@ -33,19 +33,20 @@ except ImportError:
     CppDebugger = None
     cpp_check_and_install = None
 
+# RiskLevel used to be redefined here too (a third duplicate, alongside
+# master_debugger.types.RiskLevel and common.interop.RiskLevel - see
+# roadmap.md §11.6). This module (MasterDebugger, not MasterDebuggerV5) is
+# not imported anywhere else in src/ or tests/ as of v2.6.0, so this had no
+# live behavioral effect, but fixed for consistency now that the other two
+# are unified onto common.interop.RiskLevel.
+from ..common.interop import RiskLevel
+
 
 class DebugPhase(str, Enum):
     STATIC = "static"
     RUNTIME = "runtime"
     FORMAL = "formal"
     TESTING = "testing"
-
-
-class RiskLevel(str, Enum):
-    CRITICAL = "critical"
-    HIGH = "high"
-    MEDIUM = "medium"
-    LOW = "low"
 
 
 @dataclass
@@ -145,6 +146,31 @@ class MasterDebugger:
         # Route to language-specific debugger if available
         if language.lower() == "rust" and self.rust_debugger is not None:
             return self.rust_debugger.debug(code)
+        # Assembly: route to AssemblyDebugger (Phases 8-10)
+        if language.lower() in ("assembly", "asm", "nasm", "fasm", "x86", "x86_64", "arm", "arm64"):
+            try:
+                from ..assembly_debug import AssemblyDebugger
+                arch_map = {
+                    "x86_64": "x86_64", "x86": "x86_32", "asm": "x86_64",
+                    "assembly": "x86_64", "nasm": "x86_64", "fasm": "x86_64",
+                    "arm": "arm", "arm64": "arm64",
+                }
+                arch = arch_map.get(language.lower(), "x86_64")
+                # Treat code as raw bytes if hex-decodable, else disassemble as source
+                try:
+                    raw = bytes.fromhex(code.replace(" ", "").replace("\n", ""))
+                    return AssemblyDebugger().debug_bytes(raw, arch=arch)
+                except ValueError:
+                    return AssemblyDebugger().debug_source(code, dialect="c")
+            except Exception:
+                pass  # Fall through to generic path
+        # Plain C: route to CDebugger (adds strace syscall tracing on top of CppDebugger)
+        if language.lower() == "c":
+            try:
+                from ..c_debug import CDebugger
+                return CDebugger().debug(code)
+            except Exception:
+                pass  # Fall through to CppDebugger if c_debug unavailable
         if language.lower() in ("c", "cpp", "c++") and self.cpp_debugger is not None:
             dialect = "cpp" if language.lower() in ("cpp", "c++") else "c"
             return self.cpp_debugger.debug(code, dialect=dialect)
@@ -233,7 +259,22 @@ class MasterDebugger:
         
         report.token_cost = token_cost
         report.recommendations = self._generate_recommendations(report)
-        
+
+        # Phase 5: Auto-generate regression tests when issues were found.
+        # "bugs found → tests generated → verify fix" (memory instruction).
+        # Only runs for Python code; skipped on error without failing the report.
+        if language.lower() == "python" and total_issues > 0:
+            try:
+                try:
+                    from ..test_generator.test_generator import generate_tests
+                except ImportError:
+                    from test_generator.test_generator import generate_tests  # type: ignore
+                tg_result = generate_tests(code, language="python", max_tests=20)
+                report.test_suite = tg_result.test_code
+                token_cost += 150
+            except Exception:
+                pass  # Non-fatal: report continues without test suite
+
         return report
     
     async def _phase_2_formal(self, code: str, language: str) -> Optional[Dict[str, Any]]:
