@@ -3,6 +3,16 @@
 Iterative Z3 implication-check removal of redundant @requires/@ensures clauses,
 producing a minimal equivalent contract.
 
+WHAT THIS OPERATES ON: a contract specification (two lists of clause strings —
+the text already extracted from `# Pre:`/`# Post:` annotations elsewhere), not
+code. simplify() never sees a function body. If you're looking for "prove code
+A can be rewritten as code B and still produce the same result" - that is a
+DIFFERENT, NOT-YET-BUILT capability. This module only removes clauses from a
+contract that are already logically implied by the *other clauses in that same
+contract* - it says nothing about whether the underlying code actually
+satisfies any of them (that's ContractVerifier's job, on the unsimplified or
+simplified spec either way).
+
 What counts as redundant:
   - A requires-clause that is implied by the conjunction of all other requires-clauses
     (e.g. "n >= 0" when "n >= 0 and n < 10" is also a precondition)
@@ -185,15 +195,37 @@ def _clause_to_z3(clause_str: str, env: Dict[str, Any]) -> Optional[Any]:
 # Core implication check
 # ---------------------------------------------------------------------------
 
+def _is_z3_bool(expr: Any) -> bool:
+    """True if expr is a Z3 Boolean-sorted expression (safe to Solver.add()/Not()).
+
+    A bare identifier clause (e.g. an ensures-clause of just "result", no
+    comparison) parses via `_expr_to_z3`'s `ast.Name` branch to a Z3 Int,
+    not a predicate. z3.Not() and Solver.add() both raise Z3Exception on a
+    non-Bool sort, so any call site that might receive a bare-identifier
+    clause must check this first.
+    """
+    try:
+        return expr.sort_kind() == z3.Z3_BOOL_SORT
+    except Exception:
+        return False
+
+
 def _implies(antecedent_clauses: List[Any], consequent: Any, timeout_ms: int) -> str:
     """Check if ∧(antecedent_clauses) → consequent.
 
     Returns: 'yes' (implied), 'no' (not implied), 'unknown' (timeout/error).
+    A non-boolean consequent (see `_is_z3_bool`) can't be checked and
+    returns 'unknown' so the caller conservatively keeps the clause rather
+    than crashing or silently dropping it.
     """
+    if not _is_z3_bool(consequent):
+        return "unknown"
     s = z3.Solver()
     s.set("timeout", timeout_ms)
     if antecedent_clauses:
-        s.add(z3.And(*antecedent_clauses))
+        antecedent_clauses = [c for c in antecedent_clauses if _is_z3_bool(c)]
+        if antecedent_clauses:
+            s.add(z3.And(*antecedent_clauses))
     s.add(z3.Not(consequent))
     r = s.check()
     if r == z3.unsat:
@@ -204,7 +236,13 @@ def _implies(antecedent_clauses: List[Any], consequent: Any, timeout_ms: int) ->
 
 
 def _is_tautology(expr: Any, timeout_ms: int) -> bool:
-    """Return True if expr is always True (Z3 proves ¬expr UNSAT)."""
+    """Return True if expr is always True (Z3 proves ¬expr UNSAT).
+
+    A non-boolean expr (see `_is_z3_bool`) is never a tautology in the
+    predicate sense — return False rather than crashing.
+    """
+    if not _is_z3_bool(expr):
+        return False
     s = z3.Solver()
     s.set("timeout", timeout_ms)
     s.add(z3.Not(expr))

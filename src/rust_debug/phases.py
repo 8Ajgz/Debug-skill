@@ -147,13 +147,41 @@ class RustDebugger:
         return self.debug(code)
     
     def phase_2_formal(self, code: str) -> Optional[dict]:
+        """Phase 2: Formal verification of Rust contracts via PyProver.
+
+        When PyProverBridge is available, delegates verification to it
+        directly (bridge decides internally how to treat missing contracts).
+        When the bridge is unavailable, falls back to the local
+        ContractVerifier + Z3 and returns None if no ``// Pre:`` / ``// Post:``
+        annotations are found at all.
         """
-        Phase 2: Formal verification via PyProver.
-        
-        Delegates to PyProver for contract verification.
-        """
-        # Placeholder - would call PyProver bridge
-        return None
+        try:
+            from ..common.pyprover_bridge import PyProverBridge
+            bridge = PyProverBridge()
+            if not bridge.is_available():
+                # Fall back to local ContractVerifier directly
+                from ..pyprover.contract_verifier import ContractVerifier
+                contract = ContractVerifier.parse_contract(code)
+                if not (contract.preconditions or contract.postconditions):
+                    return None
+                raw = ContractVerifier.verify_contract(code, contract)
+                return {
+                    "verified": raw["verified"],
+                    "details": raw["details"],
+                    "source": "local_contract_verifier",
+                }
+            report = bridge.verify(code, "rust")
+            if report is None:
+                return None
+            return {
+                "verified": report.risk_level.name == "LOW",
+                "risk_level": report.risk_level.name,
+                "confidence": report.confidence_score,
+                "details": [report.summary],
+                "source": "pyprover_bridge",
+            }
+        except Exception as e:
+            return {"verified": False, "error": str(e), "source": "phase_2_formal"}
     
     def phase_3_design(self, code: str) -> Optional[dict]:
         """

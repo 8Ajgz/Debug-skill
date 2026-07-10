@@ -1153,6 +1153,7 @@ def execute_with_debug(
     globals_dict: Optional[Dict] = None,
     trace_lines: bool = True,
     timeout_seconds: Optional[float] = None,
+    mock_stdin: bool = True,
 ) -> DebugReport:
     """
     Execute Python code with debug instrumentation.
@@ -1166,6 +1167,18 @@ def execute_with_debug(
                         this, raises TimeoutError. Useful for preventing
                         infinite loops in async code. Unix/Linux only.
                         Windows requires threading approach.
+        mock_stdin: If True (default), sys.stdin is replaced with an empty
+                    buffer for the duration of execution. Any input() call
+                    then raises EOFError immediately instead of hanging —
+                    there is no interactive terminal in a debugger/sandbox
+                    context, so a blocking read would otherwise wait forever.
+                    This is the primary fix for the "input() hangs
+                    indefinitely" issue; timeout_seconds is a secondary,
+                    coarser backstop for other hang categories (e.g. genuine
+                    infinite loops) and is NOT a substitute for this — a
+                    SIGALRM timeout only fires after timeout_seconds elapses
+                    and is Unix-only, while stdin mocking resolves an
+                    input()-call hang instantly and portably.
 
     Returns:
         DebugReport with timeline, final state, crash info, and suggestions.
@@ -1268,8 +1281,17 @@ def execute_with_debug(
         
         if trace_lines:
             sys.settrace(tracer)
-        with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-            exec(compiled, globals_dict)
+        old_stdin = sys.stdin
+        if mock_stdin:
+            # No interactive terminal exists in this context — any input()
+            # call must fail immediately (EOFError) rather than block
+            # forever waiting on a read that will never be satisfied.
+            sys.stdin = io.StringIO("")
+        try:
+            with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                exec(compiled, globals_dict)
+        finally:
+            sys.stdin = old_stdin
         report.execution_complete = True
     except BaseException as e:
         exc_info = sys.exc_info()

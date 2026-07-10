@@ -1,4 +1,6 @@
 z3-solver>=4.12.2
-hypothesis>=6.0
 pytest>=7.0
 pytest-cov>=4.0
+# hypothesis is listed as a future dependency for HypothesisIntegrator (roadmap §3)
+# but is not yet imported anywhere in src/. Install separately when needed:
+#   pip install hypothesis>=6.0

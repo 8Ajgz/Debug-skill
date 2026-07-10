@@ -356,11 +356,121 @@ class MasterDebugger:
         return recommendations
     
     async def classify_risk(self, code: str, language: str = "python") -> Dict[str, Any]:
-        """Quickly classify code risk level."""
+        """Classify code risk level based on static indicators.
+
+        Scores the code across four risk bands by looking for security-
+        sensitive patterns (CRITICAL), complexity markers (HIGH), moderate
+        constructs (MEDIUM), and trivial code (LOW).  Returns a dict with
+        ``risk_level`` (string), ``score`` (0.0-1.0), ``factors`` (list of
+        matched indicator descriptions), and a ``recommendation``.
+        """
+        code_lower = code.lower()
+        factors: List[str] = []
+
+        # CRITICAL indicators
+        critical_patterns = [
+            ("eval(", "eval() - arbitrary code execution"),
+            ("exec(", "exec() - arbitrary code execution"),
+            ("os.system(", "os.system() - shell injection risk"),
+            ("subprocess", "subprocess - command execution"),
+            ("pickle.loads", "pickle.loads - deserialisation vulnerability"),
+            ("__import__", "__import__ - dynamic import"),
+            ("cryptography", "cryptography library - security-critical code"),
+            ("hashlib", "hashlib - cryptographic hashing"),
+            ("password", "password handling"),
+            ("encrypt", "encryption/decryption logic"),
+            ("authenticate", "authentication logic"),
+            ("socket", "raw socket I/O"),
+            ("ssl.", "SSL/TLS - security protocol"),
+            ("jwt.", "JWT - token authentication"),
+            ("chmod", "file-permission change"),
+            ("os.remove", "file deletion"),
+            ("shutil.rmtree", "recursive file deletion"),
+        ]
+        for token, label in critical_patterns:
+            if token in code_lower:
+                factors.append(f"CRITICAL: {label}")
+
+        if factors:
+            return {
+                "risk_level": "critical",
+                "score": 1.0,
+                "factors": factors,
+                "recommendation": (
+                    "Security-sensitive code detected - run full debug_comprehensive "
+                    "with all phases, including formal verification"
+                ),
+            }
+
+        # HIGH indicators
+        high_patterns = [
+            ("open(", "file I/O - resource lifecycle risk"),
+            ("requests.", "HTTP client - network I/O"),
+            ("urllib", "URL/network access"),
+            ("database", "database interaction"),
+            ("transaction", "transactional logic"),
+            ("recursion", "recursive algorithm"),
+            ("threading", "threading - concurrency risk"),
+            ("asyncio", "async code - concurrency risk"),
+            ("multiprocessing", "multiprocessing - IPC risk"),
+            ("ctypes", "ctypes - native memory access"),
+            ("cffi", "CFFI - native FFI"),
+        ]
+        line_count = code.count('\n') + 1
+        branch_count = code.count('if ') + code.count('elif ') + code.count('while ')
+        func_count = code.count('def ') + code.count('fn ') + code.count('func ')
+
+        for token, label in high_patterns:
+            if token in code_lower:
+                factors.append(f"HIGH: {label}")
+
+        if line_count > 50:
+            factors.append(f"HIGH: large function body ({line_count} lines)")
+        if branch_count > 5:
+            factors.append(f"HIGH: high branching complexity ({branch_count} branches)")
+        if func_count > 3:
+            factors.append(f"HIGH: multiple function definitions ({func_count})")
+
+        if factors:
+            score = min(0.85, 0.55 + 0.05 * len(factors))
+            return {
+                "risk_level": "high",
+                "score": round(score, 2),
+                "factors": factors,
+                "recommendation": (
+                    "Complex or I/O-heavy code - run debug_comprehensive "
+                    "through at least Phase 2 (formal verification)"
+                ),
+            }
+
+        # MEDIUM indicators
+        medium_patterns = [
+            ("def ", "function definition"),
+            ("class ", "class definition"),
+            ("for ", "loop construct"),
+            ("while ", "loop construct"),
+            ("try:", "exception handling"),
+            ("raise ", "exception raising"),
+        ]
+        for token, label in medium_patterns:
+            if token in code_lower:
+                factors.append(f"MEDIUM: {label}")
+
+        if factors:
+            score = min(0.54, 0.25 + 0.05 * len(factors))
+            return {
+                "risk_level": "medium",
+                "score": round(score, 2),
+                "factors": factors,
+                "recommendation": "Moderate complexity - run Phases 0-1 (static + runtime analysis)",
+            }
+
+        # LOW
         return {
-            "risk_level": "medium",
-            "score": 0.5,
-            "recommendation": "Run full debug_comprehensive for detailed analysis"
+            "risk_level": "low",
+            "score": 0.1,
+            "factors": ["No elevated risk indicators found"],
+            "recommendation": "Minimal code - Phase 0 static analysis is sufficient",
         }
 
 

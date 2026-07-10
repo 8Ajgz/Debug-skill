@@ -325,3 +325,33 @@ class TestContractSimplifier:
         from pyprover.contract_simplifier import ContractSimplifier, ContractSimplificationResult
         result = ContractSimplifier().simplify(["n > 0"], [])
         assert "Z3 not available" in result.summary()
+
+    def test_bare_identifier_ensures_no_crash(self):
+        """Regression test: a bare-identifier ensures-clause (e.g. "result",
+        no comparison) parses to a Z3 Int, not a Bool. Before the fix,
+        _is_tautology/_implies called z3.Not()/Solver.add() directly on
+        this Int and raised Z3Exception. It must now be handled gracefully
+        (kept, not dropped, not crashed) — this is the same bug class the
+        sibling v2.5.2 branch found and fixed in contract_verifier.py's
+        _check_satisfiable, reconciled here for this branch's actual
+        architecture (contract_simplifier.py's _implies/_is_tautology).
+        """
+        from pyprover.contract_simplifier import ContractSimplifier
+        result = ContractSimplifier().simplify(requires=["n >= 0"], ensures=["result"])
+        if result.z3_available:
+            assert "result" in result.simplified_ensures
+
+    def test_bare_identifier_requires_no_crash(self):
+        """Same bug, requires-side: a bare-identifier precondition."""
+        from pyprover.contract_simplifier import ContractSimplifier
+        result = ContractSimplifier().simplify(requires=["flag", "flag == True"], ensures=[])
+        if result.z3_available:
+            assert "flag" in result.simplified_requires
+
+    def test_is_z3_bool_helper(self):
+        """Unit test for the _is_z3_bool guard itself."""
+        import z3
+        from pyprover.contract_simplifier import _is_z3_bool
+        assert _is_z3_bool(z3.Int("x") > 0) is True
+        assert _is_z3_bool(z3.Int("x")) is False
+        assert _is_z3_bool(z3.BoolVal(True)) is True

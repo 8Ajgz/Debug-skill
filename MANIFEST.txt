@@ -1,8 +1,8 @@
-# Debug-Suite v2.6.1 – Feature Manifest
+# Debug-Suite v2.9.1 – Feature Manifest
 
-**Status:** Production Ready | **Tests:** 359/359 passing
+**Status:** Production Ready | **Tests:** 371/371 passing in this sandbox (skip count is environment-dependent — reflects which optional tools, e.g. rustc/clang/valgrind, are installed; see CHANGELOG.md [2.7.0])
 
-**Note (2026-07-09):** most of this file predates v2.5.0/v2.6.0/v2.6.1 and was not kept current through several releases - the "Known Limitations" section below still claimed "Phases 5-10 not yet implemented" and "Rust-Debug requires rustc + clippy installed" without noting the honest-degradation fix, both stale as of this edit. Corrected the specific stale claims below; the rest of this file (Component Completeness tables predating Phase 5+) has not been fully re-audited line by line this session - treat the CHANGELOG.md and roadmap.md §11 as the more current sources of truth for what's actually implemented and verified.
+**Note (2026-07-10):** v2.7.0 is a branch-reconciliation release, merging this branch's v2.6.1 with a sibling v2.5.2 branch that diverged from the same common ancestor. See CHANGELOG.md [2.7.0] and `debug-suite-handoff.md` for the reconciliation detail. Most of the rest of this file predates v2.5.0/v2.6.0/v2.6.1 and was not kept current through several releases - the "Known Limitations" section below still claimed "Phases 5-10 not yet implemented" and "Rust-Debug requires rustc + clippy installed" without noting the honest-degradation fix, both stale as of a 2026-07-09 edit. Corrected the specific stale claims below; the rest of this file (Component Completeness tables predating Phase 5+) has not been fully re-audited line by line - treat CHANGELOG.md and roadmap.md §11-12 as the more current sources of truth for what's actually implemented and verified.
 
 ---
 
@@ -29,7 +29,7 @@
 
 ## Testing Features
 
-- [x] Unit tests for all components (359 tests, 359/359 passing as of v2.6.0; was 160 at time this line was first written - see CHANGELOG.md for the version-by-version count)
+- [x] Unit tests for all components (371 tests, 371/371 passing in this sandbox as of v2.9.1, up from 359 at v2.6.1 baseline in a fuller-toolchain sandbox; was 160 at time this line was first written - see CHANGELOG.md for the version-by-version count and note on environment-dependent skip counts)
 - [x] Contract tests for API compliance
 - [x] Integration tests for workflows
 - [x] pytest.ini with marker configuration

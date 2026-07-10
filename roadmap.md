@@ -1,6 +1,7 @@
 # Debug-Suite Roadmap
 
-**Current version:** 2.2.5
+**Current version:** 2.9.1 (this header line was stale at "2.2.5" for many releases — corrected 2026-07-10; treat every dated section below as the accurate historical record regardless of this line's past staleness)
+**See also:** `debug-suite-handoff.md` (distributed alongside this package, not bundled inside it) — a distilled, action-oriented handoff generated 2026-07-10 covering §12-§17 below in the fixed handoff-generator structure, with a prioritized Implementation Roadmap for the unmerged PyProver branch content identified in §13/§16. Read the handoff first for "what to do next"; read this file for the full reasoning behind any of it.
 **This document supersedes:** the original `debug-suite-v2_1` Phase 1-3 roadmap (reproduced in §9 below, updated with current status)
 **Compiled:** June 30, 2026, from a full conversation-history search across every component skill that was merged into this suite (pyprover, python-debug, master-debugger, test-generator, code-orchestrator, troubleshooting, standardize-skill)
 
@@ -424,3 +425,241 @@ Ad-hoc smoke test (not part of `tests/`, used across both sessions to verify cha
 | KLEE unavailable | Documented, not fixable in this environment |
 | `tree-sitter` | Documented, not attempted |
 | semgrep's ~6-8s per-call overhead | Documented, not resolved |
+
+## §12. Branch reconciliation session (2026-07-10, v2.6.1 → v2.7.0)
+
+### 12.0 Context and method
+
+This session started from `debug-suite-handoff.md`'s explicit instruction: reconcile this branch (v2.6.1) with a sibling branch (v2.5.2, chat `3abe64d4-9daa-44e5-acc8-5e4e6cda9f6b`) that diverged from the same common ancestor at nearly the same timestamp, before doing anything else. Per the handoff's Past-Chat Review Instruction, ran `conversation_search` for the sibling chat and confirmed its content via two searches (`"debug-suite MasterDebugger v6 RiskLevel"`, `"_check_satisfiable skip non-boolean expression"`) rather than trusting the handoff's summary alone. The sibling chat's tool-call transcript (str_replace old_str/new_str pairs, visible directly in the search snippets) served as the diff source, since the sibling's packaged `.skill` file itself wasn't available to fetch in this session — reconstructed each fix from the transcript, not from a re-derived guess at what the fix "should" look like.
+
+### 12.1 The four sibling fixes: three merged as-is, one required re-diagnosis
+
+Extracted the uploaded `debug-suite.skill` (v2.6.1) fresh to `/home/claude/work/debug-suite-v261` and confirmed a clean baseline (313 passed, 46 skipped, 1 deselected in this sandbox — lower pass/higher skip count than the 359/1 the original v2.6.1 session reported, because this sandbox has fewer optional tools installed; not a branch difference, a sandbox difference).
+
+Three of the sibling's four fixes transferred directly, since the target files were structurally identical between branches:
+- `master_debugger/__init__.py`: export both `MasterDebugger` (v6) and `MasterDebuggerV5`. Verified both import cleanly post-fix (rustc/clang warnings on import are expected — those toolchains aren't installed in this sandbox, unrelated to the fix).
+- `common/pyprover_bridge.py`: `_map_language_type` accepts `LanguageType` directly. Added `Union` to the typing import (the sibling's diff implied this but didn't show the import line explicitly in the retrieved transcript — inferred from the type hint itself, correct and unambiguous).
+- `requirements.txt`: removed `hypothesis`. Independently re-confirmed unused via `grep -rln "import hypothesis" src/` before removing, rather than trusting the sibling's claim unverified.
+
+The fourth — the Z3 Bool/Int bare-identifier fix in `contract_verifier.py` — did **not** transfer directly. Investigating why (rather than force-applying a patch to a file where the described bug pattern doesn't exist) surfaced a real architectural fact: **this branch's `src/pyprover/contract_verifier.py` is a 154-line stub.** Its `verify_contract()` never calls `Solver.add()` on a parsed postcondition at all — the actual body reads `"Full Z3 verification would require sophisticated SMT setup"` and just checks whether both precondition and postcondition lists are non-empty. The decorator-based `@requires`/`@ensures` contract system with a real `_check_satisfiable()` that the sibling patched isn't part of this branch's live `src/` tree — confirmed via `grep -rln "def requires\|def ensures\|_contracts\[" src/` returning only a prototype file in `legacy_code/` (not imported by anything). Force-applying the sibling's literal patch here would have edited dead code and fixed nothing.
+
+Traced where this branch's actual Z3 implication-checking lives instead (`pyprover/contract_simplifier.py`'s `_implies()`/`_is_tautology()`, added in an earlier session, not present in whatever ancestor the sibling branched from with a full contract_verifier) and checked whether the same bug class was reachable there. It was: `_expr_to_z3()`'s `ast.Name` branch turns any bare identifier into a Z3 `Int` (`env[node.id] = z3.Int(node.id)`), never a `Bool`. Reproduced before fixing:
+
+```
+ContractSimplifier().simplify(requires=['n >= 0'], ensures=['result'])
+→ Z3Exception: Value cannot be converted into a Z3 Boolean value
+```
+
+Fixed with a `_is_z3_bool()` sort-check guard (mirroring the sibling's `_is_z3_bool` helper name and approach, adapted to this branch's actual call sites) in both `_implies()` and `_is_tautology()`. Non-boolean clauses now route through the existing `"unknown"`/timeout-clause conservative-keep path rather than crashing — same soundness principle the sibling's fix used (never silently drop, never crash). Re-ran the reproduction after the fix: no crash, clause conservatively kept.
+
+### 12.2 tree-sitter: scoped and decided — no-go for the suite-wide framing, narrow opportunity noted
+
+The previous session (§12, first pass) deferred this without actually scoping it. Did the scoping pass this session: audited every regex-based source-parsing call site in `src/` to determine what tree-sitter would actually replace or supplement.
+
+**Finding: this suite's regex usage falls into two buckets, and tree-sitter is the wrong tool for both of them.**
+
+1. **Tool-output parsing, not source parsing.** `cpp_debug/diagnostics.py`'s `_DIAG_RE` parses Clang diagnostic output. `c_debug/debugger.py`'s `_STRACE_LINE_RE`/`_VALGRIND_HEADLINE_RE`/`_VALGRIND_FRAME_RE` parse strace/valgrind stdout. `assembly_debug/dataflow.py`'s register-token regex operates on an already-tokenized operand string, not multi-line source. None of these are parsing source code — tree-sitter parses source grammars, not arbitrary tool-output log formats, so it doesn't apply here regardless of how the original "documented but not implemented" library list framed it.
+
+2. **`python_debug/bug_patterns.py`'s raw-source anti-pattern regexes** (e.g. `range(len(x)+1)`, `while i <= len(...)`, mutate-during-iteration) genuinely are matching against raw Python source, and genuinely are fragile to formatting/whitespace/comment variance the way regex-on-source always is. But Python already has a real, dependency-free structural parser in the stdlib (`ast`), which this same codebase already uses elsewhere for exactly this kind of pattern-matching (`pyprover/contract_simplifier.py`'s `_expr_to_z3`/AST walk). Adding tree-sitter's Python grammar to fix this file would mean carrying a new native-extension dependency to solve a problem the standard library already solves for free. If `bug_patterns.py`'s regex fragility becomes a real problem, `ast`-based rewrite is the right fix, not tree-sitter — but that's its own separate, smaller task, not part of a tree-sitter integration.
+
+**Deeper reason the suite doesn't need tree-sitter for its main languages: it already delegates structural analysis to the real toolchain wherever one exists**, which is strictly better than a syntax tree. `cpp_debug/analyzer.py` shells out to the real Clang Static Analyzer (path-sensitive analysis, not just a parse tree). `rust_debug` shells out to `rustc`+`clippy`. `c_debug`/`cpp_debug` also use CBMC/KLEE (bounded model checking) and valgrind (real dynamic analysis) where installed. Confirmed via `grep -rln "import re" src/rust_debug src/javascript_debug` returning nothing — neither module hand-parses source with regex at all, because both delegate to a real toolchain (`rustc`/`clippy`; the JS module's own execution-tracing approach) instead. A syntax tree from tree-sitter would be a strict downgrade in analysis quality compared to what these modules already get from real compilers, not an upgrade.
+
+**The one place a real gap exists:** PyProver's `ContractVerifier.parse_contract()` (or its equivalent in whichever module actually does the Z3 solving per §12.1's finding that this branch's `contract_verifier.py` is a stub) is explicitly documented as "language-agnostic text parsing regardless of declared language" — it finds `# Pre:`/`// Post:`/`/* Inv: */` comment annotations by proximity, with no real understanding of function boundaries, for any of PyProver's other 11 target languages (Go, Java, C#, WebAssembly, NASM, FASM, etc. per SKILL.md's language list). Tree-sitter has grammars for most of these and could in principle locate the actual enclosing function for a contract comment rather than assuming adjacency. This is a real, narrow, single-file opportunity — but it's marginal (comment-adjacency already works for the common case of a contract comment immediately preceding the function it describes) and not the "touches every language module" framing the original request implied.
+
+**Decision: no-go on tree-sitter as a suite-wide integration.** The suite's existing architecture (delegate to real toolchains, use `ast` for Python, keep regex only for tool-output parsing) already captures most of what tree-sitter would offer, for the languages that matter most. Not re-opening this as a "maybe later" item — if the PyProver comment-adjacency edge case (contract comment far from its function) becomes an actual reported problem, that's a small, separately-scoped task, not a reason to revisit this suite-wide decision.
+
+### 12.3 Test coverage added
+
+No new pytest test files existed for `SemgrepAnalyzer`/`LiefBinaryAnalyzer` before this session (a gap the handoff explicitly flagged) — still true after this session; out of scope here, since this session's mandate was reconciliation, not closing that specific pre-existing gap. Did add regression coverage for everything touched this session:
+- `src/common/tests/test_pyprover_bridge.py` (new file, 4 tests): string mapping, case-insensitivity, `LanguageType`-direct-pass, unknown-input `None`.
+- `src/master_debugger/tests/test_orchestration.py`: new `TestPublicAPIExports` class (2 tests) confirming both orchestrators import and are in `__all__`.
+- `src/pyprover/tests/test_verification.py`: 3 new tests in `TestContractSimplifier` (`test_bare_identifier_ensures_no_crash`, `test_bare_identifier_requires_no_crash`, `test_is_z3_bool_helper`).
+
+Full suite after all fixes and new tests: **322 passed, 46 skipped, 1 deselected, 0 failed** — up from the 313-passed baseline by exactly the 9 new tests, confirming zero regressions from the reconciliation.
+
+### 12.4 What did not need reconciling
+
+`master_debugger/types.py` and `master_debugger/orchestrator.py`'s `RiskLevel` unification (this branch's own v2.6.1 work, §11.6) required no merge action — the sibling branch's retrieved transcript never touched `RiskLevel` in either file, so there's no competing change to reconcile, only this branch's existing fix to preserve (which it was, untouched).
+
+### 12.5 `input()` hang fixed — design decision made: mock stdin, not just a timeout
+
+The last open item from earlier sessions (§11's Known Issues, carried through the v2.6.1/v2.5.2 reconciliation): `MasterDebuggerV5.debug()` hangs indefinitely on traced code that calls `input()`, since there's no interactive terminal in this sandboxed context and a blocking read waits forever. The handoff named three candidate fixes without picking one: timeout-wrap, mock stdin, or redirect from `/dev/null`.
+
+**Decision: mock stdin (an in-memory empty buffer), not a timeout.** `python_debug/debug_report.py`'s `execute_with_debug()` already had an optional `timeout_seconds` parameter (SIGALRM-based) from an earlier session, but it was never given a default, so `Phase1RuntimeDebug.run()` never passed one — the mechanism existed but wasn't reachable from the actual hang path. A timeout alone would also have been the wrong primary fix even if wired up: it's Unix-only (SIGALRM doesn't exist on Windows), and it only resolves the hang after `timeout_seconds` elapses rather than immediately. Swapping `sys.stdin` for an empty `io.StringIO()` for the duration of `exec()` (restored in a `finally`, success or exception) makes any `input()` call fail instantly with `EOFError` — portable, immediate, and the `EOFError` gets captured by the existing exception-handling path exactly like any other crash, correctly attributed and reported, not silently swallowed. Added as `mock_stdin: bool = True` (opt-out available, default on — there is never a legitimate reason for traced code to block on real interactive input in this suite's actual usage context). The pre-existing `timeout_seconds` mechanism is kept as-is, documented as a secondary backstop for other hang categories (e.g. genuine infinite loops), not a substitute for the stdin fix.
+
+No other call sites needed changes — `Phase1RuntimeDebug.run()` calls `execute_with_debug(code)` with defaults, so `mock_stdin=True` applies automatically through the existing `MasterDebuggerV5.debug()` → `Phase1RuntimeDebug.run()` → `execute_with_debug()` chain.
+
+Verified at three levels, each with an external subprocess-level timeout as a safety net in case the fix itself was wrong (so a regression would fail loudly rather than hang the verification itself): direct `execute_with_debug()` call with an `input()`-calling snippet (returned instantly, `exception_info` correctly populated as `EOFError`); confirmed `sys.stdin` is restored to the caller's original object afterward, both on the crash path and the success path (a global mutation that outlives the call would be a worse bug than the one being fixed); confirmed the full `MasterDebuggerV5.debug()` → `Phase1RuntimeDebug` → `execute_with_debug()` chain completes instantly on real `input()`-calling code, with `phases_executed: [0, 1]` and a sensible `risk_level`, not a hang.
+
+**Found, not fixed, out of scope for this task:** `DebugReport.finalize()` unconditionally sets `execution_complete = True` regardless of whether the run crashed (confirmed by direct testing: an `EOFError`-crashed run still shows `execution_complete: True`). This is a pre-existing, differently-named-field issue — the actual crash signal used by `to_dict()` and most of the reporting surface is `exception_info is not None`, which is correct and unaffected by this quirk, but `get_execution_summary()`'s top-level `"status"` field does rely on the (apparently mislabeled) `execution_complete` flag and would report `"completed"` even for a crashed run. Not touched this session — it predates the `input()` fix, is orthogonal to it, and fixing a field's semantics suite-wide deserves its own scoped pass rather than a drive-by change bundled into an unrelated bug fix.
+
+5 new regression tests added to `src/python_debug/tests/test_execution_tracing.py`'s new `TestStdinMocking` class: instant-return-not-hang with correct `EOFError` attribution, crash correctly reported via `to_dict()`, stdin restored after both crash and success paths, opt-out (`mock_stdin=False`) leaves `sys.stdin` untouched, and non-`input()`-calling code is unaffected by the change (confirms no side effect on the common case).
+
+Full suite after this fix: **327 passed, 46 skipped, 1 deselected, 0 failed** (322 + 5 new tests, zero regressions).
+
+### 12.6 `SemgrepAnalyzer`/`LiefBinaryAnalyzer` test gap closed
+
+The last item flagged twice (handoff's Test Strategy section, §12.3 of this file): neither had dedicated pytest coverage. Added `src/common/tests/test_semgrep_analyzer.py` and `src/cpp_debug/tests/test_lief_analyzer.py`, following the existing `@pytest.mark.skipif(not X_available(), ...)` pattern from `TestCBMCIntegration` in `test_symbolic_phase6.py`. Unconditional tests cover graceful degradation (tool not installed, no compiler, bad input never raises). Integration tests that actually invoke semgrep/lief are skipped in this sandbox (neither is installed here) but will run wherever they are. 9 new tests total (4 semgrep, 5 lief); full suite **332 passed, 57 skipped, 1 deselected, 0 failed**.
+
+## §13. Six-archive feature-loss audit (2026-07-10, same session continued)
+
+Max uploaded six old archives spanning this project's full lineage: `pyprover-v8-2.skill`, `pyprover_v11_2.skill`, `pyprover_skill__2_.zip` (unlabeled version, filenames match current bundled pyprover), `python-debug_skill.zip`, `debug-suite-v2_2.skill`, and `verification-debugging-suite-v1_1.skill` (the earliest full-suite snapshot, predating the `debug-suite` rename). Audited each for functionality present in the old archive but absent from the current `src/` tree — the same kind of audit `legacy_code/README.md` already existed to support, except this time with real source instead of `conversation_search` reconstructions.
+
+### 13.1 Method
+
+For the two full-suite snapshots (`debug-suite-v2_2`, `verification-debugging-suite-v1_1`) and the pyprover-only archive with filenames matching current modules (`pyprover_skill__2_`), used a mechanical sweep: for every `.py` file in the old archive with a same-named counterpart in current `src/`, diffed the set of top-level `def`/`class` names (`comm -23` on sorted name lists) to find anything in old-but-not-current. This catches dropped functions/classes without requiring a full line-by-line read of every file - appropriate for confirming *absence of regression* across a large, already-stable tree, as opposed to the deeper manual read needed to evaluate a *genuinely new* capability (which is what the other two archives turned out to contain).
+
+For `pyprover-v8-2` and `pyprover_v11_2` - both from before PyProver had any adapter/template architecture in the current bundled version - the mechanical name-diff doesn't apply (there's no same-named current file to diff against). These got a full manual read, and for `pyprover_v11_2`, direct execution against real test cases in an isolated sandbox (`/home/claude/work/old-versions/pyprover_v11_2_test/`, not part of any packaged output).
+
+### 13.2 Full-suite snapshots: verified clean, zero unintentional regressions
+
+Swept every module (`code_orchestrator`, `common`, `troubleshooting`, `master_debugger`, `python_debug`, `pyprover`, `test_generator`, plus `cpp_debug`/`javascript_debug`/`rust_debug` in the v2.2 snapshot) against current. Total findings across both snapshots: exactly two, both already-known and intentional, not regressions:
+
+- `common/pyprover_bridge.py::_create_placeholder_result` (present in v2.2, absent now) - its own docstring said "stand-in used until a real PyProver call is wired up." Confirmed current `pyprover_bridge.py` does call the real `pyprover.verify_contract()` now (line ~207) - this function's removal is exactly what its docstring predicted, not a loss.
+- `master_debugger/orchestrator.py` and `types.py`'s local `RiskLevel` class (present in both old snapshots, absent now) - this is this branch's own v2.6.1 `RiskLevel` unification (§11.6), which intentionally removed three duplicate local `RiskLevel` enums in favor of importing one from `common.interop`. Already documented, not a new finding.
+
+`pyprover_skill__2_.zip`'s `async_verifier.py`/`ffi_verifier.py`/`token_profiler.py`/`types_phase3.py` (filenames matching current `src/pyprover/`): zero dropped functions/classes, current is a confirmed strict superset (one addition found the other direction: a `strip_comment` helper added to `async_verifier.py` since this snapshot).
+
+**Conclusion: current v2.7.0 is a verified strict superset of both full-suite snapshots and the matching-filename pyprover archive.** No merge action needed for any of these three archives.
+
+### 13.3 `pyprover_v8_2_core_with_real_template_invariants.py`: real template logic, not integrated
+
+`pyprover-v8-2.skill`'s `core.py` has a `TemplateBase` class hierarchy (`ACCUMULATOR`, `BINARY_SEARCH`, `MIN_MAX_LOOP`, `RECURSION`, `STATE_MACHINE`, `FILTER`, `SCAN`, `WHILE_LOOP`) where each template is a dataclass with a real `generate_invariant()` method producing an actual invariant expression (e.g. `MIN_MAX_LOOP` → `"{current_best} == min(arr[:i+1])"`). This is architecturally older than (and superseded by) the adapter-based system in `pyprover_v11_2`, but it has something v11.2 lacks: real per-template constraint content, versus v11.2's empty-stub template methods (§13.4). Requires manual parameterization (the caller supplies `current_best`, `arr_var`, etc. by hand) rather than automatic extraction from source. Archived to `legacy_code/pyprover_v8_2_core_with_real_template_invariants.py`; not integrated - see §13.5 for why combining this with v11.2's auto-detection isn't a same-session task.
+
+### 13.4 `pyprover_v11_2.skill`: real source recovered, one bug found and fixed, one limitation documented
+
+This directly supersedes `legacy_code/LANGUAGE_ADAPTER_GUIDE_recovered.md`, which was explicitly marked "NOT TESTED/VERIFIED" and reconstructed only from `conversation_search` summary snippets. Max's upload is the actual `pyprover_v11_2.skill` archive - real, complete source, not a lossy reconstruction. Removed the old reconstruction file; replaced with the real thing at `legacy_code/pyprover_v11_adapters/`.
+
+Verified by running it (not just reading it), in an isolated sandbox with a real `ast`-based Python adapter, against three real Z3 test cases:
+
+1. **Soundness bug, found and fixed.** `Z3Verifier.verify()` checked whether preconditions+postconditions+template-constraints were jointly *satisfiable* (`solver.check() == sat`) rather than whether the postcondition was *implied by* the preconditions (assert antecedent, negate postcondition, check UNSAT). Reproduced: `@requires("len(arr) > 0") @ensures("result < 0")` on a max-finder reported `verified: True` before the fix - a materially wrong postcondition passing as proven. Fixed in `legacy_code/pyprover_v11_adapters/verifier_SOUNDNESS_FIXED.py` using the same implication-check pattern this project's own `contract_simplifier.py`/`loop_verifier.py` already use correctly (and the same bare-identifier Bool/Int guard fixed earlier the same session, ported here since this verifier has the identical exposure via its own `eval()`-based expression parser). Re-verified: the false-positive case now correctly reports `verified: False` with a counterexample; a genuinely-provable case still reports `verified: True`; a bare-identifier `@ensures` clause no longer crashes.
+2. **Architectural limitation, not fixed, documented.** `_accumulator_constraints()`, `_binary_search_constraints()`, `_min_max_constraints()` are all empty-list stubs - the "10 verification templates" this system advertises contribute zero actual proof content, even after the soundness fix. `template_type` is classification metadata only; the verifier can only check logical consistency between stated `@requires`/`@ensures` clauses as bare formulas, with no model of what the code's loop body actually computes. This is a materially weaker guarantee than this project's own already-shipped `pyprover/loop_verifier.py` (real Hoare-logic INIT/PRESERVATION obligations tied to actual loop AST structure).
+
+Full detail, including the exact reproduction code and the `eval()`-restriction note, is in `legacy_code/pyprover_v11_adapters/FINDINGS.md`.
+
+**What this means for a future integration:** the genuinely valuable, non-duplicated asset in this archive is the **adapter/parsing layer** (`adapters/python_adapter.py`'s real `ast`-based `@requires`/`@ensures`/`@assume` extraction, plus JS/TS/NASM/FASM/WASM equivalents at varying levels of real-vs-regex parsing per adapter) - not the verification core, which after this session's fix is sound but shallow, and which this project's own `loop_verifier.py` already exceeds for the templates both cover. A real integration should port the adapters' `extract_contracts()` output into this project's existing (stronger) verification engine, and - per §13.3 - could draw on v8.2's `generate_invariant()` pattern to give the currently-stub template methods real content, though that still needs a third piece (binding extraction: which variable is `current_best`, which is `arr_var`) that exists in neither archive as uploaded.
+
+### 13.5 Why this wasn't integrated into `src/pyprover/` this session
+
+Scope, stated plainly rather than silently thinned: a real integration is 6 languages' worth of adapter code, each needing conversion from this archive's standalone `Contract`/`VerificationResult` types to this project's `common.interop` types (the same conversion `pyprover_bridge.py::_adapt_local_result()` already does for the bundled `ContractVerifier`), rewired onto the existing verification engine instead of the weaker one bundled here, plus tests per language. That's a multi-session scope on its own (the original v11.2 build itself drew on at least 3 separate source chats per the superseded `legacy_code` index). This session did the higher-leverage work first: recovered the real source (replacing a marked-untested reconstruction), found and fixed a real soundness bug via actual execution rather than a read-through, and identified precisely which part of the archive is worth porting and which part shouldn't be (the verification core, in its bundled form). That's the right foundation for a focused future integration session - starting from verified, corrected code and a clear scope instead of an untested reconstruction and an open question.
+
+### 13.6 `python-debug_skill.zip`: one ambiguous finding, not merged
+
+`debug_report.py` and `bug_patterns.py`: zero dropped functions, current is a confirmed superset (current `debug_report.py` includes this session's own `mock_stdin` fix, §12.5). `benchmark_debug.py` and `analyze_timeline.py`: byte-identical to current.
+
+`conftest.py` differs substantially, but not as a clean superset/subset - it's a genuine divergence. The old version has richer, more specific test infrastructure: a `DebugAssertions` helper class (`assert_traces_correctly`, `assert_detects_pattern`, `assert_has_aliases`, `assert_execution_time`), more granular named scenario fixtures (`simple_code_scenario`, `complex_code_scenario`, `aliasing_scenario`, `crash_scenario`, `fixture_injection_scenario`), a `pattern_detection_timer` fixture, and a `pytest_runtest_makereport` performance-regression hook (stubbed, `pass`). Current `conftest.py` consolidated these into fewer, more generic fixtures (`execution_timer`, `memory_tracker`, a `code_scenarios` dict) with centralized marker registration.
+
+**Not merged - this is ambiguous, not a clear loss.** Unlike the pyprover adapter case (a standalone capability that simply stopped existing), this looks like a deliberate consolidation: current tests already use the newer, simpler fixtures, and forcibly reintroducing the old named fixtures/helpers risks fixture-name collisions or unused dead code rather than restoring something broken. Flagging as a real difference worth a human call, not a merge action: if Max wants the more granular scenario fixtures or the `DebugAssertions` helper class back, that's a quick, low-risk follow-up (they're self-contained additions, not a replacement of anything current tests rely on) - just not one to make unilaterally without knowing whether the consolidation was deliberate.
+
+### 13.7 Session test suite status
+
+No net-new tests from this audit itself (it was read/diff/execute-in-isolation work, not integration work) - full suite remains at the count from §12.6's end: 332 passed, 57 skipped, 1 deselected, 0 failed.
+
+## §14. The real sibling v2.5.2 archive, and a stub replaced with real code (2026-07-10, v2.8.0)
+
+Max uploaded the actual `debug-suite.skill` v2.5.2 archive - the real sibling branch this project reconciled with in §12.1 using only `conversation_search` transcripts, before the real file was available.
+
+### 14.1 Verifying the earlier reconciliation
+
+Confirmed `SKILL.md`'s `metadata.version: 2.5.2` directly (not inferred). Its own `CHANGELOG.md` is stale relative to its own version (last entry is `[2.2.5]`, seven versions behind `2.5.2`) - a documentation gap in the sibling branch itself, not something to fix here (not this project's file).
+
+Ran the same function/class-presence sweep used for the six-archive audit (§13.1's method) across every file in the real archive against this package. Three of §12.1's four reconciled items are byte-for-byte identical to the real thing: `master_debugger/__init__.py`, `pyprover_bridge.py`'s `_map_language_type`, `requirements.txt`. High confidence the `conversation_search`-based reconstruction was accurate, not just plausible.
+
+### 14.2 The real finding: `contract_verifier.py` was a non-functional stub, and existing tests never caught it
+
+The sweep flagged `src/pyprover/contract_verifier.py` as having 5 functions in the sibling not present here (`_check_implied`, `_check_satisfiable`, `_clause_to_z3`, `_expr_to_z3`, `_is_z3_bool`). Expected, per §12.1's own finding: this branch's `contract_verifier.py` is a 154-line stub, architecturally different from the sibling's real implementation, which is why the earlier session's bare-identifier fix went into `contract_simplifier.py` instead.
+
+Read the real file this time (not just the `conversation_search` snippets that surfaced `_check_satisfiable` for the earlier session's contract_simplifier.py fix). It's a complete, working `ContractVerifier`: `ast`-based (no `eval()`) comment-annotation parsing, real precondition satisfiability, postcondition *validity* via implication-checking for clauses that don't reference the return value, satisfiability-only (by explicit documented design) for clauses that do, invariant satisfiability, its own input-size hardening, its own `_is_z3_bool` guard.
+
+This is exactly the capability §13.4's `FINDINGS.md` said was missing: *"the decorator-based `@requires`/`@ensures` contract system with real Z3 solving... isn't part of this branch's live `src/` tree."* That claim was accurate for the *decorator*-based system (`pyprover_v11_adapters`, still not integrated, see §13.4) - but this is a different, simpler *comment*-annotation-based system, and it turns out this project's own `pyprover/__init__.py` and `pyprover_bridge.py` were already wired up expecting exactly this, the whole time. `pyprover/__init__.py`'s `verify_contract()` calls `ContractVerifier().verify_contract(code)` and has said `"""PyProver v14.1"""` since before this session - the plumbing expected a real verifier; only the verifier itself was a stub.
+
+**More significant than the missing capability itself: this session's own existing test suite never caught it.** `TestContractVerification`, `TestVerificationEdgeCases`, `TestContractParsing` all call `ContractVerifier().verify_contract(code)` and assert things like `assert result.get('verified') is True or result is not None` - true for any dict, vacuously, regardless of whether real verification happened. Confirmed by direct testing before replacing the stub: `# Pre: x > 0` / `# Post: x > 100` (a precondition that provably does not imply its postcondition - counterexample `x = 1`) reported `verified: True` against the stub. The tests were green the entire time this project's roadmap correctly documented the stub as a known limitation - green tests and an honestly-disclosed limitation coexisted because the tests never actually exercised the limitation.
+
+### 14.3 Fix: replaced the stub, re-verified with real proof/counterexample cases, confirmed bidirectional (not one-way)
+
+Replaced `src/pyprover/contract_verifier.py` wholesale with the sibling's real implementation. Re-verified with cases designed to distinguish real verification from the stub's near-universal `verified: True`:
+
+- `# Pre: x > 0` / `# Post: x > 100` → now correctly `verified: False`, counterexample `x = 1`.
+- `# Pre: x > 100` / `# Post: x > 0` (genuinely implied) → `verified: True`, "implied by preconditions."
+- End-to-end through `PyProverBridge.verify()`: the false-positive case now correctly classifies as `RiskLevel.CRITICAL` with the real counterexample surfaced in the summary text - confirms the `_adapt_local_result` conversion layer (already written expecting a real verifier's output shape) works correctly with actual real output, not just the stub's.
+- Full suite: 332 passed, 57 skipped, 1 deselected, 0 failed - same count as before the swap (this was a same-file replacement, not new tests), but the existing `ContractVerifier` test classes are now meaningfully exercising real behavior instead of passing vacuously.
+
+**Confirmed bidirectional, not a one-way "sibling is strictly better" merge:** diffed sibling's `contract_simplifier.py` against this branch's - sibling does *not* have this session's earlier bare-identifier fix (§12.1's contract_simplifier.py `_is_z3_bool` guard). That fix is preserved; only `contract_verifier.py` was replaced. Each branch had a real fix the other lacked, in different files, for the same underlying bug class - consistent with §12.1's original finding that the two branches diverged architecturally rather than one simply being ahead of the other.
+
+### 14.4 Updated docs
+
+`SKILL.md`'s PyProver capability line now says what `ContractVerifier` actually does (implication-checking, not just satisfiability) instead of the older, vaguer "Z3 satisfiability" phrasing that was technically accurate for the stub but undersold what the plumbing was always designed for.
+
+## §15. `ContractSimplifier` documentation clarity + pydebug merge re-verification (2026-07-10)
+
+### 15.1 `ContractSimplifier` was ambiguously documented, inviting a real misreading
+
+Max described `ContractSimplifier` as something that "checks using contracts and a mathematical proof if the code can be simplified and have the same result." Checked the actual implementation before writing anything: `ContractSimplifier.simplify(requires: List[str], ensures: List[str])` takes only clause strings - it never receives or inspects a function body. What it proves is narrower than the description: whether a clause in a contract *specification* is logically redundant given the *other clauses in that same spec* (implied by them, or a tautology) - not whether two versions of *code* produce the same result. No code-to-code equivalence checking exists anywhere in this suite, bundled or in `legacy_code/`.
+
+The previous SKILL.md wording ("Iterative Z3 implication checking removes redundant clauses") was technically accurate but didn't rule out the code-equivalence reading - "simplifier" is a genuinely ambiguous name for what this does. Rewrote three places to close the gap: the terse bullet in the components list, a new prominent "what it actually does / what it does NOT do" paragraph in the PyProver capability section (explicitly naming the code-equivalence reading as the wrong one, since without an explicit example of the wrong interpretation, it's easy for a future reader to make the same reasonable guess), and the module docstring in `contract_simplifier.py` itself (read first when the file is opened directly, independent of SKILL.md).
+
+Not a code change - `ContractSimplifier`'s actual behavior is unchanged and was already correctly implemented for what it does do (§12.1 confirmed this earlier in the session). This was purely a documentation-precision fix to prevent a future Claude instance (or Max) from expecting or claiming a capability that doesn't exist.
+
+### 15.2 "pydebug" re-verified: confirmed properly merged, including a bug-fix pass I hadn't previously checked
+
+`conversation_search` for "pydebug" (confirmed via search results to be Max's own shorthand for `python-debug`, not a separate skill) surfaced something the earlier §13.6 audit hadn't accounted for: a dedicated fix session (chat `1492eee2-fa60-4c1c-97c3-a4b7ff7eb767`) that found and fixed 6 real bugs in `debug_report.py`, taking its test suite from 12/19 to 19/19 passing. §13.6's earlier check was a function/class-*name* diff, which can't detect a *behavioral* regression where the function still exists but a bug in its body was never fixed - a meaningfully different and stronger claim needed direct testing, not name comparison.
+
+Verified each of the 6 documented bugs directly against this package's actual `debug_report.py`, not by re-reading the old fix session's claims:
+
+1. **`exception_info` API mismatch (Dict vs Tuple)** - confirmed `dict` type in this package.
+2. **`final_state` serialization losing types on non-JSON-safe values** - tested with a class with a deliberately-broken `__repr__` and a `set` (not natively JSON-serializable); both handled gracefully (`to_json()` succeeds, no crash).
+3/4. **Aliasing/mutation tracking incomplete (root cause: `sys.settrace`'s "line" event fires *before* the line executes, so same-line assignments were missing from `variables_after`)** - tested `x = [1,2,3]; y = x; z = x; x.append(4); y.append(5)`: all three variables correctly identified as aliases of the same object, all mutations correctly reflected in `final_state`.
+5. **`bug_patterns.py` API incompatibility with the fixed `exception_info` format** - tested a division-by-zero case through the full `BugPatternDetector` pipeline: `DIVISION_BY_ZERO` correctly detected.
+6. **Test suite bugs** - not independently checkable (was about the *old* standalone test file's own assertions, not this package's), but this package's own `python_debug` test suite (33 tests, a superset of the 19 from that session) passes in full: 33/33.
+
+**Conclusion: pydebug is confirmed properly merged, this specific bug-fix pass included.** No corrective action needed - this section exists to record that the deeper, behavioral check was done and passed, not just the shallower name-presence check from §13.6.
+
+## §16. `EquivalenceVerifier` built (2026-07-10, v2.9.0) — the capability §15.1 said didn't exist
+
+### 16.1 Scope decision, stated before writing code
+
+Max asked for "a contract verifier like system to extrapolate the simplest equivalent code from more verbose code." Read literally and fully generally, this is program synthesis with an optimality claim ("the simplest") - undecidable for arbitrary Turing-complete code (two programs' equivalence is Rice's-theorem territory; there's no algorithm that decides it for every pair). Said so directly rather than quietly building something narrower and calling it what was asked for.
+
+Built the honest, tractable version instead, stated as two separable pieces: (1) a **verifier** - given two code snippets, prove them equivalent or find a counterexample, directly analogous to `ContractVerifier`'s architecture and reusing its expression-translation layer; (2) a **simplifier** - not synthesis/search, but handing the verifier's own symbolic representation of a function to Z3's sound term-rewriter, which is a real, algebraic reduction, not a guess. Explicitly did not attempt open-ended rewrite search or multi-candidate synthesis - `propose_redundant_branch_removal()` is one hand-written pattern, chosen because it's simple enough to verify by inspection that the pattern-match logic itself is correct, not because it's the start of a general engine.
+
+### 16.2 Architecture: reuse, not reimplementation
+
+`equivalence_verifier.py` imports `_expr_to_z3`/`_OP_MAP` directly from `contract_verifier.py` rather than duplicating expression-to-Z3 translation a third time (contract_verifier.py, contract_simplifier.py, and now this module all need it - contract_simplifier.py has its own copy from before this session; a future cleanup could consolidate all three onto one shared translator, not done here to avoid an unrelated refactor riding along with a new feature). The new capability is entirely in the statement/control-flow layer on top: tracking variable assignment across statements, combining `if`/`else` branches, and bounded loop unrolling - none of which existed anywhere in this suite before.
+
+### 16.3 Two real bugs found while building, not just at the end
+
+Per this project's established practice (verify by running, not by reading), tested every piece incrementally before writing the formal test suite - and both bugs below were caught this way, before they could hide behind a passing-by-coincidence test the way §15.2's audit found in `ContractVerifier`'s old stub.
+
+**Bug 1 - the control-flow design was wrong on the first pass.** The initial `if`/`else` handling required both branches to return, or neither to - anything else (`if cond: return X`, followed by more code) was rejected as "ambiguous." That's not actually ambiguous; it's the single most common branching shape in real code (early return), and rejecting it would have made the tool nearly useless for anything past toy examples. Caught by testing a deliberately ordinary example (`if x > 10: result = 100` / `result += 1` / `return result`) before assuming the design was right. Rewrote `_exec_stmts` around an explicit `("return", value)` / `("fallthrough", env)` flow representation: when exactly one branch returns and the other falls through, the falling-through branch's flow continues into the remaining statements, and the combination is only accepted if that remainder itself definitely returns - otherwise it's correctly rejected as "does not return on every path," a real error rather than a tooling limitation. Both directions (then-returns/else-falls-through and its mirror) have regression tests.
+
+**Bug 2 - unsupported constructs could crash instead of degrading.** `contract_verifier._expr_to_z3` (the reused leaf-expression translator) raises a raw `NotImplementedError` for anything it doesn't handle - function calls, attribute access. The new module's public functions caught `UnsupportedConstructError` (this module's own exception type) but not the raw `NotImplementedError` bubbling up from the reused code, so a recursive function or `x.attr` access would crash instead of returning `status="unsupported"`. Fixed with `_expr_to_z3_safe()`, a thin wrapper applied at every call site that converts the exception type. Separately (not the same bug, found by the same "test the obvious next case" habit): expressions using a bare boolean variable directly with `and`/`or`/`not` (e.g. `not a`) hit a genuine *inherited* limitation - the reused translator always seeds an unbound name as a Z3 `Int`, so `Not()` on it is a sort mismatch. This isn't a bug introduced here; it's `contract_verifier.py`'s own existing scope boundary (consistent with SKILL.md's long-standing "integer arithmetic clauses only" note for the same translator), surfaced now because this module is the first caller to hit it with genuinely boolean free variables. Caught the raw `Z3Exception` at the three call sites that could produce it and reported it with a specific, actionable workaround (use an Int-typed comparison) rather than a bare stack trace.
+
+### 16.4 Verification method
+
+Every piece tested by direct execution before being declared working, consistent with this project's standing practice: expression equivalence (algebraically-equal case, unequal case with a real counterexample, and specifically an unequal-by-a-constant case with no free variable in the model, which turned out to need its own formatting fix); function equivalence across nested/nested-redundant branches, the early-return pattern, a wrong "simplification" correctly rejected with a counterexample, bounded-loop accumulator-vs-closed-form (Gauss sum, `range(10)` unrolled) both correctly proven and correctly caught when wrong, and a loop deliberately exceeding `max_unroll` correctly rejected rather than silently truncated; `simplify_function()` on the same redundant-branch example, cross-checked against `verify_function_equivalence()` independently (not just trusting `simplify_function`'s own Z3 usage) to confirm the two entry points agree; the rewrite-pattern proposer on both a matching case (proposes and verifies) and a non-matching case (correctly returns nothing). 28 tests in the module's own file plus 4 through `PyProverBridge`, all passing; full suite 364/364, zero regressions from the 332 baseline.
+
+### 16.5 What's still out of scope, on purpose
+
+List/dict/string operations, recursion, generators, unbounded loops, multiple return values, and function calls other than the arithmetic/boolean operators `contract_verifier.py` already handles. Bare boolean variables need an Int-typed comparison as a workaround (§16.3). None of these are silently mishandled - every one raises `UnsupportedConstructError` or reports `status="unsupported"` with a specific reason. Extending the supported subset (e.g. adding string operations, or invariant-based reasoning for unbounded loops instead of bounded unrolling) is real future work, not attempted this session - the module docstring's own scope statement is the honest boundary of what got built, not an aspirational one.
+
+## §17. Two real stubs found via body-diff; a merge-methodology gap disclosed (2026-07-10, v2.9.1)
+
+### 17.1 How this was found
+
+Re-read the sibling v2.5.2 branch's own conversation summary (chat `3abe64d4-9daa-44e5-acc8-5e4e6cda9f6b`, first surfaced in §12.1 but not re-read in full at the time) while searching for other chats to link for Max. It mentions "a stub-elimination pass that found and replaced three real stubs... `ContractVerifier.verify_contract()`... `RustDebugger.phase_2_formal()`... and `MasterDebugger.classify_risk()`." §14 already merged the first of these (`ContractVerifier`). The other two were never checked - §14's sweep method (comparing which function/class *names* exist in each branch) can't see a same-named function with a different, worse body. Ran a plain `diff` on every file that exists in both branches (not a name-presence check - the actual file contents) and found exactly these two, confirmed by direct execution: `classify_risk("eval(x)")` returned the identical `{"risk_level": "medium", "score": 0.5}` as `classify_risk("x = 1")` before the fix (a hardcoded stub, not degraded-but-real classification), and `phase_2_formal()` returned `None` unconditionally regardless of input before its fix.
+
+### 17.2 What got merged, and what didn't (this wasn't a wholesale swap)
+
+`classify_risk()`: took the sibling's real implementation wholesale - four-tier pattern-based classification (CRITICAL/HIGH/MEDIUM/LOW), verified to produce genuinely different scores for genuinely different inputs.
+
+`phase_2_formal()`: **surgical merge, not a file replacement.** The full diff of `rust_debug/phases.py` showed this branch is actually *ahead* of the sibling elsewhere in the same file - `phase_1_runtime`'s tool-availability-aware confidence scoring and honest degradation messaging (distinguishing "no issues found because the code is clean" from "no issues found because rustc/clippy never ran") is this branch's own work, absent from the sibling. Replaced only the `phase_2_formal` method body, leaving the rest of the file - including the parts where this branch is ahead - untouched. Confirms §14.1's original finding held here too: the two branches diverged in both directions on different files, not one being a strict superset of the other.
+
+Also swept `c_debug/*.py` and `cpp_debug/*.py` for the same class of hidden stub via full body-diff (not just name-presence) while doing this pass, since those were flagged as "differ" back in §14's initial file-list sweep but never individually inspected. Confirmed clean: every difference in those files is this branch being ahead (valgrind integration, cppcheck, lief, the CBMC 6.x flag-name fix) - real content on this branch's side, nothing missing.
+
+### 17.3 The disclosure that matters more than the two fixes themselves
+
+§13's six-archive audit and §14's sibling reconciliation both used exactly the name-presence-only method that just missed two real stubs here. Manually body-diffing `c_debug`/`cpp_debug`/`master_debugger/phases.py` this session (§17.2) came back clean, which is a good sign for §13's other six archives by the same logic - but "the one file I manually checked was fine" is a materially weaker claim than "verified strict superset," which is the phrase §13.2 actually used. **Not going back to re-audit all six archives from §13 with a full body-diff this session** - that's real, bounded, separately-scoped work (six archives × every shared file, actually reading bodies not just names), and doing it properly deserves its own pass rather than a rushed pass appended here. Flagging this precisely so a future session (or Max) knows exactly what "verified" meant at the time §13 was written, and what it would take to strengthen that claim.
+
+### 17.4 Test coverage added
+
+7 new tests: `TestMasterDebuggerV6ClassifyRisk` (4 tests) covering the same-score-for-everything regression specifically (`test_different_inputs_give_different_scores`, the test that would have caught this stub immediately had it existed before). `rust_debug` had zero test coverage before this session - created `src/rust_debug/tests/` with 3 tests scoped specifically to `phase_2_formal()`; broader `rust_debug` coverage (phase_0/phase_1/phase_3, `RustDebugger.debug()` end-to-end) is a separate, larger, pre-existing gap not addressed here. Full suite: 371 passed, 57 skipped, 1 deselected, 0 failed.

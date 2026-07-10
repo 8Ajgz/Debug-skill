@@ -18,16 +18,48 @@ description: >
 compatibility: "Python 3.8+; z3-solver for formal verification; Rust toolchain (rustc+clippy, or apt package rust-clippy) recommended for Rust; Clang and cppcheck recommended for C/C++; valgrind recommended for C dynamic memory-error detection; CBMC 6.x for symbolic execution (flag names changed from 5.x - see CHANGELOG 2.6.0); bandit and semgrep recommended for Python security analysis (semgrep uses a locally-bundled ruleset, not the semgrep.dev registry); lief recommended for C/C++ binary hardening analysis"
 
 metadata:
-  version: 2.6.1
+  version: 2.9.1
   status: production
   interop_level: 4
 ---
 
-# Debug Suite v2.6.1
+# Debug Suite v2.9.1
 
-**Status:** Production Ready | **Components:** 18 | **Test suite:** 359/359
+**Status:** Production Ready | **Components:** 19 | **Test suite:** 371/371 (this sandbox; optional-tool skip count varies by environment — see CHANGELOG)
 
-**NEW in v2.6.1 (this release, same-day follow-up to v2.6.0):**
+**NEW in v2.9.1 (this release — two real stubs found and fixed, plus a merge-methodology gap):**
+- `MasterDebugger.classify_risk()` (v6, `orchestrator.py`) was a hardcoded stub returning `{"risk_level": "medium", "score": 0.5}` for every input — replaced with the real pattern-based classifier from the actual sibling v2.5.2 archive.
+- `RustDebugger.phase_2_formal()` was a placeholder (`# Placeholder - would call PyProver bridge` / `return None`) — replaced with the real PyProverBridge-delegating implementation from the same archive.
+- **Found by name-based diffing missing same-named, different-body stubs**: v2.8.0's merge only compared which functions existed in each branch, not what they did — a function present in both branches with the same name but a stub body in one was invisible to that check. A full body-diff (`diff` on every shared file, not just a name-presence sweep) caught these two. See CHANGELOG.md [2.9.1] for what this means for confidence in earlier "verified superset" claims.
+- 7 new regression tests. See CHANGELOG.md [2.9.1] for full detail.
+
+**NEW in v2.9.0 (`EquivalenceVerifier`, real code-to-code equivalence checking):**
+- New `src/pyprover/equivalence_verifier.py`: proves whether two functions compute the same result for all inputs (symbolic execution + Z3), for a defined subset (straight-line/branching arithmetic, bounded loops). Not general program synthesis — explicitly, honestly narrower than that, see the module's own docstring and SKILL.md's "EquivalenceVerifier scope" note.
+- `simplify_function()`: derives a real, Z3-verified algebraic simplification of a function's computation (not a suggestion — Z3's own sound term-rewriter).
+- `propose_redundant_branch_removal()`: one hand-written, always-independently-verified rewrite pattern — not open-ended search.
+- Reachable via `PyProverBridge.verify_equivalence()` / `.simplify_function_code()`.
+- Directly answers a gap `ContractSimplifier`'s own clarified documentation (v2.8.0) explicitly named as missing.
+- 32 new tests (28 in `equivalence_verifier` itself, 4 through the bridge). Two real bugs found and fixed during development, not just at the end: a control-flow bug that rejected the common "early return" pattern as unsupported when it's actually well-defined, and a missing exception-translation path that let a raw `Z3Exception`/`NotImplementedError` escape instead of degrading to `status="unsupported"`.
+- See CHANGELOG.md [2.9.0] for full detail.
+
+**NEW in v2.8.0 (real `ContractVerifier` from the actual sibling v2.5.2 archive):**
+- `pyprover/contract_verifier.py` was a non-functional stub (own comment: "Full Z3 verification would require sophisticated SMT setup") — replaced with a real, working Z3-based implementation from the actual sibling branch archive Max uploaded. Real precondition satisfiability, postcondition validity (implication-checked), invariant satisfiability.
+- The existing `ContractVerifier` test classes were passing against the stub via vacuous assertions the whole time (`assert result is not None`-style) — now meaningfully exercised against real verification.
+- Confirms the earlier v2.7.0 reconciliation (done via `conversation_search` transcripts, before the real sibling archive was available) was accurate — three other reconciled files are byte-identical to the real thing.
+- See CHANGELOG.md [2.8.0] for full detail.
+
+**NEW in v2.7.0 (branch reconciliation with sibling v2.5.2, plus same-day follow-up work):**
+- Both `MasterDebugger` (v6, active) and `MasterDebuggerV5` (legacy) now exported from `master_debugger`
+- `pyprover_bridge._map_language_type` accepts `LanguageType` enum directly
+- `hypothesis` phantom dependency removed from `requirements.txt`
+- Bare-identifier Z3 Bool/Int crash fixed in `pyprover/contract_simplifier.py` (`_implies`/`_is_tautology`)
+- `MasterDebuggerV5`'s `input()`-hangs-forever bug fixed (stdin mocking, `execute_with_debug(mock_stdin=True)` default)
+- `tree-sitter` integration: scoped and decided (no-go for a suite-wide integration — see CHANGELOG/roadmap §12.2)
+- `SemgrepAnalyzer`/`LiefBinaryAnalyzer` test coverage gap closed (9 new tests)
+- Six-archive feature-loss audit: real `pyprover_v11_2` language-adapter source recovered (superseding an untested reconstruction), a genuine Z3 soundness bug found and fixed in it, both full-suite snapshots verified as strict subsets of current
+- See CHANGELOG.md [2.7.0] and roadmap.md §12-§13 for full detail
+
+**NEW in v2.6.1 (same-day follow-up to v2.6.0):**
 - **`RiskLevel` enum unification**: the three separate `RiskLevel` classes documented as unresolved in v2.6.0 are now one. `src.RiskLevel is common.interop.RiskLevel` (literally the same class), so `report.risk_level == src.RiskLevel.X` now works correctly for reports from every component, not just `MasterDebuggerV5`.
 - **bandit fix**: `Phase0StaticAnalysis`'s bandit integration never actually surfaced a finding on any input - its match condition (`'WARNING' in output.stdout`) never matched real bandit output. Fixed via `-f json` parsing; verified against real vulnerable code.
 - **semgrep integration** (`src/common/semgrep_analyzer.py`): pattern-based second opinion alongside bandit, using a locally-bundled 20-rule security ruleset (semgrep.dev's registry isn't reachable from sandboxed environments - see `semgrep_rules/README.md`). Adds a disclosed ~6-8s per-call latency cost.
@@ -60,7 +92,8 @@ metadata:
 **NEW in v2.3:**
 - **Bug fixes (all from self-analysis):** `ContractVerifier.parse_contract()` now correctly finds `# Pre:`/`# Post:`/`# Inv:` annotations (was a no-op on all real input); `Phase1RuntimeDebug` import errors fixed (Phase 1 now actually runs inside the orchestrator); `DiagnosisResult` field access fixed in Phase 3 design review; test generator emits the correct function name in generated test code; 9 dead f-strings and 2 unencoded `open()` calls cleaned up in `python_debug/debug_report.py`.
 - **LoopVerifier** (`src/pyprover/loop_verifier.py`): Z3 INIT + PRESERVATION proof obligations for while-loop invariants annotated as `# Invariant: expr`. Supports arithmetic expressions, multiple loop variables, graceful degradation if z3-solver not installed.
-- **ContractSimplifier** (`src/pyprover/contract_simplifier.py`): Iterative Z3 implication checking removes redundant `@requires`/`@ensures` clauses. Soundness-preserving: timed-out clauses are always kept.
+- **ContractSimplifier** (`src/pyprover/contract_simplifier.py`): Iterative Z3 implication checking removes redundant `@requires`/`@ensures` **clauses from a contract spec** (not code — its only input is the list of clause strings, never a function body). Soundness-preserving: timed-out clauses are always kept. See the full "ContractSimplifier — what it actually does" note later in this file before using or describing this tool; the name invites a reasonable but incorrect guess (proving two versions of *code* equivalent), which is not what it does.
+- **EquivalenceVerifier** (`src/pyprover/equivalence_verifier.py`, new in v2.9): this is that capability — actual code-to-code equivalence, added because `ContractSimplifier` explicitly doesn't do it. `verify_function_equivalence(code_a, func_a, code_b, func_b)` symbolically executes both functions and Z3-proves their outputs equal for all inputs (or returns a concrete counterexample), for a defined subset: straight-line/branching integer+boolean code, plus bounded `for x in range(N)` loops (literal `N`, unrolled — same bounded-model-checking principle as this suite's CBMC/KLEE integration, not an invariant proof for arbitrary `N`). `simplify_function(code, func_name)` builds the same symbolic expression and hands it to Z3's own sound term-rewriter, returning a genuine algebraic simplification (e.g. a redundant nested `if` collapsing to a single comparison) — not a paraphrase or a guess. Constructs outside the supported subset (function calls, recursion, unbounded loops, list/string/dict operations, bare-boolean variables used with `and`/`or`/`not`) raise `UnsupportedConstructError` or return `status="unsupported"` with a reason — never a silent wrong answer. Read the module's own docstring before using it or explaining it to someone: it states plainly that general "find the objectively simplest equivalent program" is undecidable for arbitrary code (Rice's-theorem territory) and that this module is deliberately narrower than that. Reachable via `PyProverBridge.verify_equivalence()` / `PyProverBridge.simplify_function_code()`.
 - **FFI verifier wired** into `PyProverBridge.verify_ffi()` and `verify_loop_invariants()` — both now reachable via the bridge without direct import.
 - **Test generator → MasterDebugger wiring**: `debug_comprehensive()` now automatically generates a regression test suite via `test_generator` when issues are found (per roadmap memory instruction).
 - **Expected output inference**: test generator now executes deterministic functions with generated inputs and captures real expected values (replacing `# TODO: Verify expected output` stubs).
@@ -213,7 +246,7 @@ p2 = Phase2FormalVerification.run(code) # → FormalVerificationResult
 p3 = Phase3DesignReview.run(code)     # → DesignReviewResult
 ```
 
-> **Note on class name:** the orchestrator class is `MasterDebugger` (not `MasterDebuggerV5` as documented in versions ≤ 2.2.x — that was a SKILL.md documentation error). `MasterDebuggerV5` is the old standalone class in `orchestrator_v5.py` and is kept for backward compatibility but is not the active orchestrator.
+> **Note on class name:** as of v2.7.0, `master_debugger` exports **both** `MasterDebugger` (v6, active — supports all languages, async `debug_comprehensive()`) and `MasterDebuggerV5` (legacy, sync `debug()`, Python/JS only, kept for backward compatibility). Versions 2.2.x–2.6.1 only exported `MasterDebuggerV5`; `MasterDebugger` existed in `orchestrator.py` but was dead code, unimported anywhere — this was fixed in v2.7.0's branch reconciliation. Prefer `MasterDebugger` for new code.
 
 ### Python Debug v12.3
 
@@ -522,17 +555,23 @@ python -m pytest src/ -m "not slow"
 - **GitHub analysis (code-orchestrator):** requires read access to repositories
 
 **PyProver — what's in the bundled src/pyprover vs. the full lineage:**
-The bundled PyProver is a curated subset, not a full port of the v6–v14 lineage. Confirmed present: `ContractVerifier` (comment-annotation scanning + Z3 satisfiability), `AsyncVerifier` (regex-based concurrency heuristics), `FFIVerifier` (FFI type/memory/lifetime safety, reachable via `PyProverBridge.verify_ffi()`), `LoopVerifier` (Z3 INIT + PRESERVATION for arithmetic invariants, new in v2.3), `ContractSimplifier` (Z3 implication-check redundancy elimination, new in v2.3). Confirmed absent: parallel/batch verification (ThreadPoolExecutor), SymPy-accelerated expression simplification, Hypothesis property-based test generation, beartype runtime type checking, CBMC/KLEE bounded-model-checking, and real per-language AST adapters (the `ContractVerifier` comment scanner is language-agnostic text parsing regardless of declared language). The `hypothesis` package is in `requirements.txt` but never imported anywhere in the suite — a known phantom dependency from an earlier consolidation.
+The bundled PyProver is a curated subset, not a full port of the v6–v14 lineage. Confirmed present: `ContractVerifier` (comment-annotation scanning; real Z3 checking as of v2.8.0 — precondition satisfiability, postcondition *validity* via implication-checking for non-`result`-referencing clauses, satisfiability-only for `result`-referencing clauses since the return expression itself isn't evaluated, invariant satisfiability), `AsyncVerifier` (regex-based concurrency heuristics), `FFIVerifier` (FFI type/memory/lifetime safety, reachable via `PyProverBridge.verify_ffi()`), `LoopVerifier` (Z3 INIT + PRESERVATION for arithmetic invariants, new in v2.3), `ContractSimplifier` (Z3 implication-check redundancy elimination, new in v2.3). Confirmed absent: parallel/batch verification (ThreadPoolExecutor), SymPy-accelerated expression simplification, Hypothesis property-based test generation, beartype runtime type checking, CBMC/KLEE bounded-model-checking, and real per-language AST adapters (the `ContractVerifier` comment scanner is language-agnostic text parsing regardless of declared language — real per-language adapter source now recovered in `legacy_code/pyprover_v11_adapters/`, not yet integrated, see roadmap.md §12.6/§13.4). The `hypothesis` package was in `requirements.txt` but never imported anywhere in the suite — this phantom dependency was removed in v2.7.0 (kept only as a commented-out future-dependency note for the not-yet-built `HypothesisIntegrator`).
 
 **LoopVerifier scope (v2.3):** verifies INIT (invariant is satisfiable at loop entry) and PRESERVATION (inductive for integer iteration variables named i/j/k/idx/n/count). Does not perform full symbolic execution of arbitrary loop bodies. Invariants must be arithmetic expressions over integer variables; string/list/object invariants are skipped with a clear note. TERMINATION is not verified (requires an explicit bound expression beyond what the current annotation syntax supports).
 
+**ContractSimplifier — what it actually does (read this before using it or explaining it):** `ContractSimplifier.simplify(requires: List[str], ensures: List[str])` takes a **contract specification** — the clause strings already extracted from `# Pre:`/`# Post:` annotations by `ContractVerifier.parse_contract()` — and removes clauses that are **logically redundant given the other clauses in the same spec**: a `requires` clause implied by the conjunction of the other `requires` clauses (e.g. `"n >= 0"` is redundant when `"n >= 0 and n < 10"` is also a precondition), an `ensures` clause implied by the preconditions plus the other `ensures` clauses, or a tautology (`"True"`, `"n == n"`). The proof mechanism (Z3 implication-checking: negate the candidate clause, assert it alongside the others, check UNSAT) is real and sound — clauses Z3 can't decide within the timeout are always kept, never silently dropped.
+
+**What it does NOT do, because this is the natural but wrong reading of "simplifier":** it does not take a function's code and prove that a *simplified or rewritten version of that code* would produce the same result. It never sees the function body at all — its only input is a list of clause strings. **If you want that** — code-to-code equivalence checking, or deriving a simplified equivalent of a function's actual computation — **use `EquivalenceVerifier` (`src/pyprover/equivalence_verifier.py`, new in v2.9) instead**, described just above in the components list. `ContractSimplifier` and `EquivalenceVerifier` are deliberately separate tools operating on deliberately different inputs (a contract spec vs. a function body); naming them both "simplifier"-adjacent is exactly the ambiguity this note exists to head off.
+
 **ContractSimplifier scope (v2.3):** integer arithmetic clauses only; string/boolean/list expressions may be kept unconditionally if Z3 can't parse them (conservative, soundness-preserving).
+
+**EquivalenceVerifier scope (v2.9):** straight-line and branching integer/boolean arithmetic only (reuses `contract_verifier.py`'s expression translator, so the same operator set: `+ - * // / % < <= > >= == != and or not`). Function calls (including recursion), list/dict/string operations, generators, and mutation of aliased objects are rejected as `UnsupportedConstructError`, never guessed at. Loops are supported only as `for x in range(N)` with a *literal* `N`, unrolled up to `max_unroll` (default 64) — this proves equivalence up to that bound, not for arbitrary `N`, the same bounded-verification caveat CBMC/KLEE already carry elsewhere in this suite. A bare boolean-typed variable used directly with `and`/`or`/`not` (e.g. `not flag`) hits a real, inherited limitation: the reused expression translator always seeds an unbound name as a Z3 `Int`, so `Not()` on it is a sort mismatch — reported as `status="unsupported"` with an explanatory reason, not a crash; use an Int-typed comparison instead (e.g. `flag > 0`). `propose_redundant_branch_removal()` is the only pattern-matched rewrite proposer shipped — deliberately one narrow, hand-verified pattern, not a general search; every candidate it proposes is run back through `verify_function_equivalence()` before being returned, so nothing unverified is ever surfaced as a suggestion.
 
 **FFIVerifier wiring (v2.3):** `PyProverBridge.verify_ffi()` synthesizes a minimal FFIContract from the first function signature found via regex. It is a heuristic entry point. For precise FFI checking, construct `FFIContract`/`FFISignature` explicitly and call `FFIVerifier.verify()` directly.
 
 **AsyncVerifier:** text/regex-based heuristic, not AST-based. Can misfire on files whose source is *about* concurrency detection (e.g. analyzing `async_verifier.py` itself). Does not handle multi-line triple-quoted docstrings.
 
-**MasterDebugger class name:** the active orchestrator is `MasterDebugger` (not `MasterDebuggerV5`, which was a documentation error in versions ≤ 2.2.x). `MasterDebuggerV5` is preserved in `orchestrator_v5.py` for backward compatibility.
+**MasterDebugger class name:** the active orchestrator is `MasterDebugger` (not `MasterDebuggerV5`, which was a documentation error in versions ≤ 2.2.x). As of v2.7.0, both are properly exported from `master_debugger/__init__.py` — `MasterDebuggerV5` is preserved in `orchestrator_v5.py` for backward compatibility, but was the only one importable prior to v2.7.0 (`MasterDebugger` was dead code, unimported anywhere, from v2.2.x through v2.6.1).
 
 **`get_variable_mutations()` return type:** returns `List[Tuple[lineno, prev_value, new_value]]` (plain tuples), not named objects. The SKILL.md Quick Start examples above use the correct tuple format.
 
@@ -582,6 +621,27 @@ MIT License - See LICENSE file
 
 ## Version History
 
+- **v2.9.1** (2026-07-10): Two real stubs found and fixed (`MasterDebugger.classify_risk()`, `RustDebugger.phase_2_formal()`) by body-diffing every shared file against the real sibling v2.5.2 archive, not just comparing function names — see CHANGELOG.md for full detail, including what this means for confidence in earlier "verified superset" claims against the other six archives
+- **v2.9.0** (2026-07-10): New `EquivalenceVerifier` (`src/pyprover/equivalence_verifier.py`) — real code-to-code equivalence checking and Z3-backed simplification, built in direct response to v2.8.0's own documentation clarifying that `ContractSimplifier` doesn't do this — see CHANGELOG.md for full detail
+  - `verify_function_equivalence()`: symbolic execution + Z3 proof that two functions compute the same result for all inputs (straight-line/branching arithmetic, bounded loops)
+  - `simplify_function()`: real algebraic simplification via Z3's own term-rewriter, not a guess
+  - `propose_redundant_branch_removal()`: one hand-written rewrite pattern, always independently re-verified before being returned
+  - Reachable via `PyProverBridge.verify_equivalence()` / `.simplify_function_code()`
+  - 32 new tests; two real bugs found and fixed during development (an over-conservative control-flow rejection of the common early-return pattern, and a missing exception-translation path)
+- **v2.8.0** (2026-07-10): Replaced `pyprover/contract_verifier.py`'s non-functional stub with a real, working Z3-based implementation from the actual sibling v2.5.2 archive Max uploaded — see CHANGELOG.md for full detail
+  - Real precondition satisfiability, postcondition validity (implication-checked, not just satisfiability), invariant satisfiability
+  - Existing `ContractVerifier` tests were passing against the stub via vacuous assertions the whole session before this - now meaningfully exercised
+  - Confirmed the earlier `conversation_search`-based reconciliation (v2.7.0) was accurate against the real archive
+- **v2.7.0** (2026-07-10): Branch reconciliation with sibling v2.5.2 (chat `3abe64d4-9daa-44e5-acc8-5e4e6cda9f6b`) + same-day follow-up — see CHANGELOG.md for full detail
+  - `master_debugger/__init__.py` now exports both `MasterDebugger` (v6) and `MasterDebuggerV5`
+  - `pyprover_bridge._map_language_type` accepts `LanguageType` enum directly, not just strings
+  - Removed `hypothesis` phantom dependency from `requirements.txt`
+  - Fixed bare-identifier Z3 Bool/Int crash in `pyprover/contract_simplifier.py` (same bug class the sibling branch found in `contract_verifier.py`, present here in a different module due to architectural divergence)
+  - Fixed `MasterDebuggerV5`'s `input()`-hangs-forever bug (stdin mocking)
+  - Scoped and decided against a suite-wide `tree-sitter` integration (reasoning documented, not just deferred)
+  - Closed the `SemgrepAnalyzer`/`LiefBinaryAnalyzer` test-coverage gap
+  - Six-archive feature-loss audit: recovered real `pyprover_v11_2` adapter source (replacing an untested reconstruction), found+fixed a Z3 soundness bug in it, verified both older full-suite snapshots are strict subsets of current
+  - Added regression tests for every fix above
 - **v2.4.0** (2026-07-04): Phases 5 (DWARF), 6 (CBMC/KLEE), 7 (C-Debug + strace) — 92 new tests, 265 total
   - Phase 5: DWARFAnalyzer via pyelftools (stack-pointer escape, void\* heap, double-free heuristics)
   - Phase 6: SymbolicExecutor wrapping CBMC + KLEE with deduplication and graceful degradation

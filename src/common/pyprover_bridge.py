@@ -16,7 +16,7 @@ with local analysis only.
 """
 
 import sys
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Union
 
 from .interop import (
     UnifiedDebugReport,
@@ -253,8 +253,13 @@ class PyProverBridge:
             summary=summary,
         )
     
-    def _map_language_type(self, pyprover_lang: str) -> Optional[LanguageType]:
-        """Map a PyProver language string (e.g. 'csharp', 'nasm') to LanguageType."""
+    def _map_language_type(self, pyprover_lang: Union[str, LanguageType]) -> Optional[LanguageType]:
+        """Map a PyProver language string (e.g. 'csharp', 'nasm') to LanguageType.
+
+        Also accepts a LanguageType enum directly and returns it unchanged.
+        """
+        if isinstance(pyprover_lang, LanguageType):
+            return pyprover_lang
         mapping = {
             "python": LanguageType.PYTHON,
             "javascript": LanguageType.JAVASCRIPT,
@@ -595,6 +600,86 @@ class PyProverBridge:
                 }
                 for r in report.results
             ],
+        }
+
+    def verify_equivalence(
+        self,
+        code_a: str,
+        func_a: str,
+        code_b: str,
+        func_b: str,
+        max_unroll: int = 64,
+    ) -> Optional[Dict[str, Any]]:
+        """Prove whether two functions compute the same result for all
+        inputs, using the bundled equivalence_verifier (symbolic execution
+        + Z3, supported subset: straight-line/branching arithmetic code,
+        plus bounded 'for x in range(N)' loops — see
+        pyprover/equivalence_verifier.py's module docstring for the exact
+        scope and what's explicitly NOT supported).
+
+        Returns a dict with keys: status ("decided"/"unsupported"/"unknown"),
+        equivalent (bool or None), counterexample, reason, summary. Returns
+        None only if the bundled pyprover module itself is unavailable —
+        an out-of-scope construct in the code is NOT a None return, it's
+        status="unsupported" with a reason, so callers can distinguish
+        "PyProver isn't installed" from "this specific code can't be
+        analyzed."
+        """
+        if self._pyprover_module is None:
+            return None
+        try:
+            from ..pyprover.equivalence_verifier import verify_function_equivalence
+        except ImportError:
+            try:
+                from pyprover.equivalence_verifier import verify_function_equivalence  # type: ignore
+            except ImportError:
+                return None
+
+        result = verify_function_equivalence(code_a, func_a, code_b, func_b, max_unroll=max_unroll)
+        return {
+            "status": result.status,
+            "equivalent": result.equivalent,
+            "counterexample": result.counterexample,
+            "reason": result.reason,
+            "proof_a": result.proof_a,
+            "proof_b": result.proof_b,
+            "summary": result.summary(),
+        }
+
+    def simplify_function_code(
+        self,
+        code: str,
+        func_name: str,
+        max_unroll: int = 64,
+    ) -> Optional[Dict[str, Any]]:
+        """Derive an algebraically simplified equivalent of a function's
+        return value via the bundled equivalence_verifier's Z3-backed
+        simplify_function(). See that function's docstring: the result is
+        a Z3 expression's string form (what the code reduces to), not
+        auto-generated Python — turning it back into idiomatic code is a
+        manual follow-up.
+
+        Returns a dict with keys: status, original_expr, simplified_expr,
+        reason, summary. Returns None only if pyprover itself is
+        unavailable.
+        """
+        if self._pyprover_module is None:
+            return None
+        try:
+            from ..pyprover.equivalence_verifier import simplify_function
+        except ImportError:
+            try:
+                from pyprover.equivalence_verifier import simplify_function  # type: ignore
+            except ImportError:
+                return None
+
+        result = simplify_function(code, func_name, max_unroll=max_unroll)
+        return {
+            "status": result.status,
+            "original_expr": result.original_expr,
+            "simplified_expr": result.simplified_expr,
+            "reason": result.reason,
+            "summary": result.summary(),
         }
 
 

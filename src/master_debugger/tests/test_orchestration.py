@@ -143,3 +143,69 @@ s.close()
         # Should be minimal phases for simple code
         assert report.risk_level in [RiskLevel.MEDIUM, RiskLevel.LOW]
         assert len(report.phases_executed) >= 1
+
+
+class TestPublicAPIExports:
+    """Regression tests for the v2.5.2-sibling-branch reconciliation:
+    master_debugger/__init__.py must export both the active v6 orchestrator
+    (MasterDebugger) and the legacy v5 orchestrator (MasterDebuggerV5),
+    not just the latter.
+    """
+
+    def test_both_orchestrators_importable(self):
+        from .. import MasterDebugger, MasterDebuggerV5
+        assert MasterDebugger is not None
+        assert MasterDebuggerV5 is not None
+        assert MasterDebugger is not MasterDebuggerV5
+
+    def test_all_exports_present(self):
+        from .. import __all__
+        assert "MasterDebugger" in __all__
+        assert "MasterDebuggerV5" in __all__
+
+
+class TestMasterDebuggerV6ClassifyRisk:
+    """Regression tests for MasterDebugger (v6, orchestrator.py)'s
+    classify_risk() - was a hardcoded stub (always {"risk_level": "medium",
+    "score": 0.5}) regardless of input, found and fixed by comparing
+    against the real implementation in the actual sibling v2.5.2 archive.
+    A hardcoded classifier is worse than no classifier: it looks like a
+    real signal but silently ignores the code entirely.
+
+    classify_risk() is async; pytest-asyncio isn't a dependency of this
+    suite, so these drive it via asyncio.run() in ordinary sync test
+    functions rather than adding a new test-runner dependency for four
+    tests.
+    """
+
+    @pytest.fixture
+    def debugger(self):
+        from ..orchestrator import MasterDebugger
+        return MasterDebugger()
+
+    def test_trivial_code_is_low_risk(self, debugger):
+        import asyncio
+        result = asyncio.run(debugger.classify_risk("x = 1 + 1"))
+        assert result["risk_level"] == "low"
+
+    def test_eval_is_critical_risk(self, debugger):
+        import asyncio
+        result = asyncio.run(debugger.classify_risk("result = eval(user_input)"))
+        assert result["risk_level"] == "critical"
+        assert result["score"] == 1.0
+        assert any("eval(" in f for f in result["factors"])
+
+    def test_different_inputs_give_different_scores(self, debugger):
+        """The defining regression check: a hardcoded stub returns the
+        same score for everything. Real classification must not."""
+        import asyncio
+        trivial = asyncio.run(debugger.classify_risk("x = 1"))
+        critical = asyncio.run(debugger.classify_risk("os.system(cmd)"))
+        assert trivial["score"] != critical["score"]
+        assert trivial["risk_level"] != critical["risk_level"]
+
+    def test_moderate_complexity_is_medium(self, debugger):
+        import asyncio
+        code = "def f(x):\n    for i in range(x):\n        pass\n    return i\n"
+        result = asyncio.run(debugger.classify_risk(code))
+        assert result["risk_level"] in ("medium", "low")

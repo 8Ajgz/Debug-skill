@@ -5,6 +5,7 @@ Tests execution tracing, variable tracking, bug pattern detection,
 and exception handling.
 """
 
+import sys
 import pytest
 from ..debug_report import execute_with_debug, DebugReport
 
@@ -278,3 +279,59 @@ class TestCrashReporting:
         summary = report.get_execution_summary()
         assert summary["exception"]["type"] is None
         assert summary["exception"]["message"] is None
+
+
+class TestStdinMocking:
+    """Regression tests for the input()-hangs-forever fix.
+
+    Traced code has no interactive terminal in a debugger/sandbox context,
+    so a blocking input() call must fail fast (EOFError) rather than hang
+    indefinitely. mock_stdin=True is the default; execute_with_debug()
+    swaps sys.stdin for an empty buffer for the duration of exec() and
+    always restores it afterward, success or exception.
+    """
+
+    def test_input_call_raises_eof_not_hang(self):
+        """The defining regression test: must return promptly (not hang)
+        and correctly attribute the failure to EOFError, not something
+        else. Uses no external timeout here deliberately - if this
+        regresses, the test process itself will hang, which is the
+        clearest possible failure signal for this specific bug.
+        """
+        report = execute_with_debug("x = input('prompt: ')\nprint(x)")
+        assert report.exception_info is not None
+        assert report.exception_info["exception_type"] is EOFError
+
+    def test_input_call_reported_as_crash(self):
+        report = execute_with_debug("x = input()\n")
+        d = report.to_dict()
+        assert d["execution"]["status"] == "crashed"
+        assert d["execution"]["exit_code"] == 1
+
+    def test_stdin_restored_after_execution(self):
+        """sys.stdin must be the caller's original object again after
+        execute_with_debug() returns, whether the run crashed or not -
+        otherwise every subsequent input() call anywhere in the process
+        (including outside this debugger) would also start raising."""
+        original_stdin = sys.stdin
+        execute_with_debug("x = input()\n")
+        assert sys.stdin is original_stdin
+        execute_with_debug("y = 1\n")
+        assert sys.stdin is original_stdin
+
+    def test_mock_stdin_false_leaves_stdin_untouched(self):
+        """Opt-out: mock_stdin=False must not swap sys.stdin at all. Does
+        not exercise an actual input() call (that would hang with a real
+        stdin in a non-interactive test runner) - only confirms the
+        non-default code path doesn't touch sys.stdin identity."""
+        original_stdin = sys.stdin
+        execute_with_debug("x = 1\n", mock_stdin=False)
+        assert sys.stdin is original_stdin
+
+    def test_non_input_code_unaffected_by_mocked_stdin(self):
+        """Code that never calls input() must behave identically regardless
+        of mock_stdin - confirms the fix has no side effect on the common
+        case (the vast majority of debugged code never touches stdin)."""
+        report = execute_with_debug("x = 1 + 1\nassert x == 2")
+        assert report.exception_info is None
+        assert report.final_state.get("x") == 2
