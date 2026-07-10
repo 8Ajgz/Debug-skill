@@ -68,6 +68,149 @@ def absolute(x):
         assert result is not None
 
 
+class TestBuiltinFunctionContracts:
+    """Integration tests: z3_builtins.py wired through ContractVerifier.verify_contract.
+
+    Before this, len()/abs()/min()/max()/string comparisons all silently
+    degraded to 'non-arithmetic, skipped' -- confirmed by direct testing
+    before this class existed. These tests lock in that they now actually
+    verify (or actually fail) rather than silently passing through unchecked.
+    """
+
+    @pytest.fixture
+    def verifier(self):
+        return ContractVerifier()
+
+    def test_len_postcondition_verified(self, verifier):
+        code = """
+def f(arr):
+    # Pre: len(arr) > 0
+    # Post: len(result) == len(arr)
+    return arr
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is True
+
+    def test_len_contradiction_caught(self, verifier):
+        code = """
+def f():
+    # Pre: len(x) > 0
+    # Post: len(x) < 0
+    return None
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is False
+
+    def test_abs_verified(self, verifier):
+        code = """
+def f(x):
+    # Post: abs(x) >= 0
+    return abs(x)
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is True
+
+    def test_max_min_relationship_verified(self, verifier):
+        code = """
+def f(a, b):
+    # Pre: a > 0
+    # Pre: b > 0
+    # Post: max(a, b) >= min(a, b)
+    return a
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is True
+
+    def test_max_min_wrong_relationship_caught(self, verifier):
+        code = """
+def f(a, b):
+    # Pre: a > 0
+    # Pre: b > 0
+    # Post: max(a, b) < min(a, b)
+    return a
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is False
+
+    def test_string_equality_verified(self, verifier):
+        code = """
+def f(s):
+    # Pre: s == "hello"
+    # Post: s == "hello"
+    return s
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is True
+
+    def test_string_equality_contradiction_caught(self, verifier):
+        code = """
+def f(s):
+    # Pre: s == "hello"
+    # Post: s == "goodbye"
+    return s
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is False
+
+    def test_str_predicates_verified(self, verifier):
+        code = """
+def f(s):
+    # Pre: s == "hello world"
+    # Post: str_contains(s, "world")
+    return s
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is True
+
+    def test_str_predicate_contradiction_caught(self, verifier):
+        code = """
+def f(s):
+    # Pre: s == "foo"
+    # Post: str_starts_with(s, "bar")
+    return s
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is False
+
+
+class TestQuantifiedContracts:
+    """Integration tests: quantifiers.py wired through ContractVerifier.verify_contract."""
+
+    @pytest.fixture
+    def verifier(self):
+        return ContractVerifier()
+
+    def test_quantified_postcondition_verified(self, verifier):
+        code = """
+def f(n):
+    # Pre: n > 0
+    # Post: all(i >= 0 for i in range(0, n))
+    return list(range(n))
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is True
+        assert result['postconditions_ok'] is True
+
+    def test_quantified_postcondition_that_is_false_fails(self, verifier):
+        code = """
+def f():
+    # Post: all(i < 5 for i in range(0, 10))
+    return None
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is False
+        assert result['postconditions_ok'] is False
+
+    def test_quantified_existential_postcondition(self, verifier):
+        code = """
+def f():
+    # Post: any(i == 7 for i in range(0, 10))
+    return 7
+"""
+        result = verifier.verify_contract(code)
+        assert result['verified'] is True
+
+
 class TestLoopInvariants:
     """Test loop invariant verification."""
     

@@ -177,9 +177,7 @@ class MasterDebugger:
         
         report = UnifiedDebugReport()
         token_cost = 0
-        static_issues = 0
-        runtime_issues = 0
-        
+
         # Phase 0 + 1 + 3: for Python, delegate to the real static/runtime/design
         # analyzers (mypy + python-debug execution tracing) instead of stubbing.
         # Other languages fall back to PyProver-only formal verification (Phase 2)
@@ -193,18 +191,56 @@ class MasterDebugger:
                 )
                 if "static" in phases:
                     static_result = Phase0StaticAnalysis.run(code)
-                    static_issues += len(static_result.mypy_errors) + len(static_result.pylint_issues)
+                    # Real bug fixed here (see roadmap.md §20): these findings
+                    # used to be counted into a local int and then discarded --
+                    # report.issues_found never received them, so the final
+                    # synthesis below (which reads report.issues_found) was
+                    # structurally blind to every static finding. Now appended
+                    # as real Issue objects so they actually participate.
+                    for err in static_result.mypy_errors:
+                        report.issues_found.append(Issue(
+                            phase=DebugPhase.STATIC, type="mypy_error",
+                            description=err, severity="medium", confidence=0.9,
+                        ))
+                    for issue in static_result.pylint_issues:
+                        report.issues_found.append(Issue(
+                            phase=DebugPhase.STATIC, type="pylint_issue",
+                            description=issue, severity="low", confidence=0.7,
+                        ))
                     report.phases_completed.append(DebugPhase.STATIC)
                     token_cost += 50
                 if "runtime" in phases:
                     runtime_result = Phase1RuntimeDebug.run(code)
-                    runtime_issues += len(runtime_result.patterns_found)
+                    # Same fix as static, above: patterns_found used to only
+                    # feed a local counter, never report.issues_found.
+                    # Note: patterns_found is typed List[str] but Phase1RuntimeDebug
+                    # actually stores the BugPatternType enum members themselves
+                    # (a pre-existing minor type/hint mismatch, not introduced
+                    # here) -- normalized to .value below so Issue.type (typed
+                    # str) actually gets a string, and so the severity check
+                    # isn't silently comparing an enum member to a string
+                    # literal (which found while writing this: that comparison
+                    # is always False, so the naive version of this line would
+                    # have quietly given every runtime pattern "medium"
+                    # severity, including unhandled exceptions).
+                    for pattern_name in runtime_result.patterns_found:
+                        pattern_str = getattr(pattern_name, "value", None) or str(pattern_name)
+                        report.issues_found.append(Issue(
+                            phase=DebugPhase.RUNTIME, type=pattern_str,
+                            description=f"Runtime pattern detected: {pattern_str}",
+                            severity="high" if pattern_str == "unhandled_exception" else "medium",
+                            confidence=0.85,
+                        ))
                     report.phases_completed.append(DebugPhase.RUNTIME)
                     token_cost += 100
                 if "testing" in phases:
                     design_result = Phase3DesignReview.run(code)
                     if not design_result.passed:
-                        runtime_issues += 1
+                        report.issues_found.append(Issue(
+                            phase=DebugPhase.TESTING, type="design_review_failed",
+                            description="Design review flagged this code (see phase_3_design details)",
+                            severity="medium", confidence=0.6,
+                        ))
                     report.phases_completed.append(DebugPhase.TESTING)
                     token_cost += 200
             except Exception as e:
@@ -236,22 +272,47 @@ class MasterDebugger:
                 report.issues_found.extend(async_issues)
                 token_cost += 100
         
-        # Classify overall health
-        total_issues = static_issues + runtime_issues + len(report.issues_found)
-        if report.issues_found:
-            # Concurrency findings are HIGH severity by construction
-            # (see _phase_2_async); never report VERIFIED alongside them.
-            report.overall_health = f"⚠️  {total_issues} issue(s) found"
+        # ------------------------------------------------------------------
+        # Synthesis with explicit conflict resolution (roadmap.md §20/§5).
+        #
+        # Real bug this replaces: the previous version checked
+        # `if report.issues_found:` to decide whether to report issues, but
+        # `report.issues_found` only ever contained async-concurrency
+        # findings (the static/runtime fix above is what makes this section
+        # correct now) -- so whenever async findings were empty, a passing
+        # PyProver contract silently produced "✅ VERIFIED" regardless of
+        # what static analysis or the runtime trace actually found.
+        # Confirmed directly: `undefined_variable_reference_xyz` in a
+        # function body with a trivially-true contract produced
+        # "✅ VERIFIED" / RiskLevel.LOW even though the runtime trace
+        # captured a real NameError.
+        #
+        # This is exactly the "streams disagree" case roadmap.md §5 flagged
+        # as missing (master-debugger v3.0's blind-spot model): a formal
+        # contract proves a *narrow* mathematical property, and passing it
+        # says nothing about whether the rest of the function body even
+        # runs. When that happens now, it's surfaced as an explicit
+        # CONFLICT state instead of either stream silently winning.
+        # ------------------------------------------------------------------
+        total_issues = len(report.issues_found)
+        pyprover_verified = bool(report.pyprover_result and report.pyprover_result.get("verified"))
+
+        if total_issues > 0 and pyprover_verified:
+            report.overall_health = (
+                f"⚠️  CONFLICT: formal verification passed but {total_issues} "
+                f"static/runtime issue(s) were found elsewhere -- the contract "
+                f"likely doesn't cover the part of the code that's actually broken"
+            )
             report.risk_level = RiskLevel.HIGH
-            report.confidence_score = 0.7
-        elif report.pyprover_result and report.pyprover_result.get("verified"):
-            report.overall_health = "✅ VERIFIED"
-            report.risk_level = RiskLevel.LOW
-            report.confidence_score = 0.95
+            report.confidence_score = 0.5  # lower than either stream's own confidence: they disagree
         elif total_issues > 0:
             report.overall_health = f"⚠️  {total_issues} issue(s) found"
             report.risk_level = RiskLevel.HIGH if total_issues > 3 else RiskLevel.MEDIUM
             report.confidence_score = 0.8
+        elif pyprover_verified:
+            report.overall_health = "✅ VERIFIED"
+            report.risk_level = RiskLevel.LOW
+            report.confidence_score = 0.95
         else:
             report.overall_health = "⚠️  INCONCLUSIVE"
             report.risk_level = RiskLevel.MEDIUM

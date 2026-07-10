@@ -1,5 +1,61 @@
 # Changelog
 
+## [2.9.4] - 2026-07-10 (two severe synthesis bugs found in the bug-detection tool's own aggregation logic)
+
+### Fixed
+
+Found while investigating roadmap.md §5's flagged-but-not-yet-built "conflict resolution when streams disagree" item. Before building that as new functionality, tested whether the orchestrator's *existing* synthesis logic was even structurally capable of surfacing a disagreement — it wasn't, for two independent reasons, both confirmed by direct execution before any fix was written.
+
+**Bug 1 (`src/python_debug/bug_patterns.py`):** `BugPatternDetector`'s exception-driven dispatch recognized exactly four exception types (`IndexError`, `KeyError`, `TypeError`, `ZeroDivisionError`). Any other unhandled exception fell through with zero patterns generated, even though `report.exception_info` correctly captured the real crash. Confirmed directly: a bare undefined-name reference inside a function body raised `NameError`, `exception_info` captured it correctly, and `Phase1RuntimeDebug.run()`'s `passed = len(patterns) == 0` reported `passed=True` — a function that crashes on every call, reported as passing. Fixed with a new `UNHANDLED_EXCEPTION` fallback pattern covering every exception type without a specialized detector.
+
+**Bug 2 (`src/master_debugger/orchestrator.py`):** `report.issues_found` — the list the final synthesis logic actually reads to decide whether to report "✅ VERIFIED" — only ever received async-concurrency findings. Static analysis (`mypy_errors`/`pylint_issues`) and runtime findings (`patterns_found`) were counted into local integer variables and then discarded; they never became `Issue` objects, never reached `report.issues_found`. Combined with Bug 1 being fixed, this was directly confirmed: code with a real captured `NameError` alongside a trivially-passing formal contract produced `"✅ VERIFIED"` / `RiskLevel.LOW`. Fixed two ways: static/runtime findings are now converted into real `Issue` objects and appended to `report.issues_found`; and the synthesis logic was restructured to check `total_issues` and `pyprover_verified` independently rather than letting a passing formal check short-circuit past everything else. When both disagree (issues found elsewhere *and* PyProver reports verified), the report now surfaces an explicit `"⚠️ CONFLICT: formal verification passed but N static/runtime issue(s) were found elsewhere"` state — this is the "streams disagree" conflict-resolution behavior roadmap.md §5 flagged as missing from `master-debugger v3.0`'s blind-spot model, arrived at by fixing the orchestrator's own real bug rather than porting v3.0's documentation-only version of the concept.
+
+A real bug was found and fixed while writing this fix's own tests, not just at the end: the first version of the runtime-Issue conversion compared `pattern_name == "unhandled_exception"` to assign severity, but `RuntimeDebugResult.patterns_found` is typed `List[str]` while `Phase1RuntimeDebug.run()` actually stores the `BugPatternType` enum members themselves (a pre-existing, separate minor type/hint mismatch) — so that comparison was silently always `False`, and every runtime pattern including unhandled exceptions would have gotten `severity="medium"`. Caught by a test asserting the specific severity value, not just presence; fixed by normalizing to `.value` before comparing or storing.
+
+**Separately noted, not fixed:** `ContractVerifier.verify_contract()` reports `verified: True` vacuously for code with zero `# Pre:`/`# Post:` annotations at all ("nothing was checked" reported identically to "checked and correct"). This is arguably standard/defensible vacuous-truth behavior for a lightweight contract checker, not a bug introduced or found broken here — but it does mean the new CONFLICT state can now fire even when PyProver's stream found nothing to disagree *about*, which is intentional (a vacuous pass shouldn't silently outrank a real crash) but worth knowing about when reading a CONFLICT report. See roadmap.md §20.3.
+
+### Test suite
+
+11 new tests: `python_debug/tests/test_unhandled_exception_pattern.py` (6), `master_debugger/tests/test_synthesis_conflict_resolution.py` (5, covering all four synthesis outcomes: clean-verified, conflict-with-vacuous-pyprover-pass, conflict-with-genuine-pyprover-pass, and issues-found-with-no-disagreement). Observed locally: 391 passed, 57 skipped, 1 deselected, 0 failed (380 + 11, zero regressions).
+
+## [2.9.3] - 2026-07-10 (`len()`/`abs()`/`min()`/`max()` and string predicates — the biggest silent gap found so far)
+
+### Added
+
+Found by direct testing rather than a version comparison this time: none of the three independent `_expr_to_z3()` implementations in this fork (`contract_verifier.py`, `loop_verifier.py`, `contract_simplifier.py`) handled `ast.Call` at all. Confirmed before writing anything: `# Pre: len(arr) > 0`, `# Post: abs(result) >= 0`, `# Post: result == max(a, b)`, and `# Pre: s == "hello"` all silently degraded to `"non-arithmetic — skipped"` — not an error, not a warning, just quietly unverified. This is very likely the single highest-impact gap in the verifier: `len()` in particular is probably the most common function call in real contracts, and a contract full of `len()`/`abs()`/string checks was verifying "successfully" while checking close to nothing.
+
+**New module: `src/pyprover/z3_builtins.py`**, shared Call-node support across all three `_expr_to_z3` call sites (each still independently defined, per `contract_verifier.py`'s existing "avoid circular imports" convention — this module takes the caller's own `_expr_to_z3` as a parameter rather than importing one):
+
+- `len(x)`, `abs(x)`, `min(a, b, ...)`, `max(a, b, ...)` — real Z3 arithmetic. `len(x)` is modeled as a stable per-argument-text Z3 Int (repeated `len(arr)` calls within one verification share the same variable); `abs`/`min`/`max` recurse into arbitrary sub-expressions via the caller's translator, not just bare names.
+- `str_length(s)`, `str_equals(a, b)`, `str_contains(s, sub)`, `str_starts_with(s, prefix)`, `str_ends_with(s, suffix)` — backed by Z3's **real native String theory** (`z3.Length`/`z3.Contains`/`z3.PrefixOf`/`z3.SuffixOf`), not a port of PyProver v6.1/v7.0's `StringWorkAround` integer-encoding hack. Those versions hand-rolled character-scaling into ints because they weren't using Z3's real string theory; z3-solver has had native string support for years, so this restores the *capability* those old versions were reaching for without reintroducing their workaround. Bare string comparison (`s == "hello"`) also now works, via a new textual pre-pass (`infer_string_names()`/`seed_string_env()`) that types a free variable as `z3.String` instead of the default `z3.Int` when it's directly compared to a string literal or passed to one of the `str_*` predicates — deliberately conservative (only a clear signal flips the type; anything ambiguous stays the safe-to-be-wrong-in default `Int`, which fails cleanly via the existing skip path rather than misverifying).
+
+**Explicitly not done, and why:** float precision / scaled-integer float reasoning (v6.1/v7.0's `FloatWorkAround`). Z3 has real `Real`/`FP` sorts, same story as strings above — but wiring a second alternate sort through three call sites that all assume bare names default to `Int` needs the same kind of type-inference pre-pass built for strings here, for a different sort with different comparison-operator implications, and is a separately-scoped follow-up, not attempted this pass. See `roadmap.md` §19.
+
+### Test suite
+
+30 new tests: `test_z3_builtins.py` (21 — real Z3 semantics for every builtin, the string-typing inference pre-pass, and the unsupported-function/method-call/wrong-arg-count boundary), plus 9 integration tests in `test_verification.py`'s new `TestBuiltinFunctionContracts` class proving both the positive case (verified) and negative case (a real contradiction actually caught, not just "didn't crash") for every builtin through `ContractVerifier.verify_contract()` end-to-end. Observed locally: 380 passed, 57 skipped, 1 deselected, 0 failed (350 + 30, zero regressions).
+
+## [2.9.2] - 2026-07-10 (real quantifier support and ghost state tracking; loop_verifier integration explicitly deferred)
+
+### Added
+
+Two features found missing during a cross-version comparison and confirmed absent by direct inspection (`grep -rl "forall\|ghost\|quantifier" src/pyprover/*.py` before starting — the only hit was a hardcoded string literal in `types_phase3.py`, never parsed or passed to Z3). See `roadmap.md` §18 for the full investigation, including why every prior version's "quantifier support" across all three branches turned out to be either a hardcoded template or a regex match that discarded the quantified condition — this is the first real implementation.
+
+**New module: `src/pyprover/quantifiers.py`** — real `forall`/`exists` support over the `all(cond for i in range(...))`/`any(...)` syntax already used elsewhere in this codebase. Two strategies chosen automatically: bounded unroll (small integer-literal bounds, each instance checked individually so violations report a real counterexample like `i = 5`, not an empty model) and native `z3.ForAll`/`z3.Exists` (symbolic or large bounds). Wired into `contract_verifier.py`'s `_clause_to_z3()`, so `# Post: all(i >= 0 for i in range(0, n))` now goes through real quantifier checking instead of the old regex stand-in.
+
+**New module: `src/pyprover/ghost_state.py`** — `# Ghost: name = expr` / `# GhostUpdate: name = expr` comment annotations (same convention as the existing `# Pre:`/`# Post:`/`# Inv:` scanning) for spec-only auxiliary variables, checked for real Z3 consistency against declared updates and, when supplied, actual real-variable constraints. Reports which mode ran (weak self-consistency vs. the stronger real-constraints check) rather than overclaiming.
+
+**Deliberately not done:** `loop_verifier.py`'s INIT/PRESERVATION invariant checker was not wired to `quantifiers.py`. PRESERVATION requires induction (the invariant must hold again after an arbitrary iteration step), and `check_quantifier()` only proves a quantified statement true at a single state — reusing it naively would report a real-looking "verified" for something weaker than what PRESERVATION is supposed to mean. Confirmed the current behavior degrades safely instead: a quantified invariant hits `NotImplementedError` in the existing AST translator and is caught and reported as `skipped=True`, never a false "verified". Full scope of the real fix is in `roadmap.md` §18.2.
+
+### Two real bugs found and fixed while building, not just at the end
+
+1. `GhostStateTracker.check_consistency()` returned `verified` for a `GhostUpdate` referencing an undeclared ghost variable whenever `declarations` was empty — the early-return only checked `declarations`, not `updates`, so the undeclared-reference check below it was unreachable in that case. Fixed: the early-return now requires both lists to be empty.
+2. The same method's docstring claimed results were "jointly satisfiable with real-variable constraints" when no such constraints were ever actually threaded into the solver anywhere in the call chain — only variable *names* were being passed in, not constraints on them. Fixed by adding an explicit `real_var_constraints` parameter and reporting which check actually ran (weak vs. strong) in the result's `detail` field, rather than silently overclaiming the stronger one.
+
+### Test suite
+
+28 new tests: `test_quantifiers.py` (14), `test_ghost_state.py` (11), plus 3 integration tests in `test_verification.py`'s new `TestQuantifiedContracts` class. Observed locally: 350 passed, 57 skipped, 1 deselected, 0 failed (322 + 28, zero regressions) — see roadmap.md §18.3 for a noted discrepancy against §17.4's previously-recorded "371 passed" baseline (environment difference, not re-derived this session, stated rather than silently reconciled).
+
 ## [2.9.1] - 2026-07-10 (two real stubs found via body-diff; a merge-methodology gap disclosed)
 
 ### Fixed

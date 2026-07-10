@@ -18,12 +18,12 @@ description: >
 compatibility: "Python 3.8+; z3-solver for formal verification; Rust toolchain (rustc+clippy, or apt package rust-clippy) recommended for Rust; Clang and cppcheck recommended for C/C++; valgrind recommended for C dynamic memory-error detection; CBMC 6.x for symbolic execution (flag names changed from 5.x - see CHANGELOG 2.6.0); bandit and semgrep recommended for Python security analysis (semgrep uses a locally-bundled ruleset, not the semgrep.dev registry); lief recommended for C/C++ binary hardening analysis"
 
 metadata:
-  version: 2.9.1
+  version: 2.9.4
   status: production
   interop_level: 4
 ---
 
-# Debug Suite v2.9.1
+# Debug Suite v2.9.4
 
 **Status:** Production Ready | **Components:** 19 | **Test suite:** 371/371 (this sandbox; optional-tool skip count varies by environment — see CHANGELOG)
 
@@ -182,7 +182,7 @@ print(f"Solutions: {diagnosis.remediation_steps}")
 | **c-debug** | v1.0 | C-specific debugger: CppDebugger + strace syscall tracing (Phase 7) | ✅ Complete |
 | **assembly-debug** | v1.0 | Capstone disassembly + CFG (Phase 8) + taint analysis (Phase 9) + angr symbolic execution (Phase 10) | ✅ Complete |
 | **master-debugger-v5** | v5.0 | 4-phase orchestrator (static → runtime → formal → design) with cross-language support | ✅ Complete |
-| **pyprover** | v14.0 | Formal verification with Z3 (Phase 2: contracts; Phase 3: tokens/async/FFI) | ✅ Complete |
+| **pyprover** | v14.3 | Formal verification with Z3 (Phase 2: contracts, quantifiers, ghost state, len/abs/min/max/string predicates; Phase 3: tokens/async/FFI) | ✅ Complete |
 | **test-generator** | v1.1 | Edge cases, mutations, metamorphic, red-team adversarial tests | ✅ Complete |
 | **code-orchestrator** | v1.1 | Multi-function codebase analysis, GitHub projects, decomposition, checkpointing | ✅ Complete |
 | **troubleshooting** | v1.0 | 5-phase methodology, problem classification, diagnosis, remediation | ✅ Complete |
@@ -331,7 +331,7 @@ division-by-zero. A design-review pass flags unsafe string APIs (`gets`,
 `strcpy`) and raw `new` with no matching `delete`. Degrades gracefully if
 clang/clang++ aren't installed.
 
-### PyProver v14.0
+### PyProver v14.3
 
 ```python
 from debug_suite.pyprover import ContractVerifier, verify_contract
@@ -347,7 +347,44 @@ print(f"Details: {result['details']}")
 
 # Or use convenience function
 result = verify_contract(code, language="python")
+
+# Quantified postconditions (new in v14.2) -- forall/exists over a real Z3
+# quantifier, wired transparently through the same # Post:/# Pre: scanning:
+code = """
+def f(n):
+    # Pre: n > 0
+    # Post: all(i >= 0 for i in range(0, n))
+    return list(range(n))
+"""
+result = verify_contract(code)  # result['verified'] is True, real Z3 check
+
+# Ghost state (new in v14.2) -- spec-only auxiliary variables, checked with
+# real Z3 for consistency rather than just recorded:
+from debug_suite.pyprover import GhostStateTracker
+decls, updates = GhostStateTracker.extract(source_code)  # scans # Ghost:/# GhostUpdate:
+ghost_result = GhostStateTracker.check_consistency(decls, updates, real_var_env, expr_to_z3)
+print(ghost_result.consistent, ghost_result.detail)
+
+# len()/abs()/min()/max() and string predicates (new in v14.2->v14.3) -- these
+# used to silently degrade to "non-arithmetic, skipped" with no warning:
+code = """
+def f(arr):
+    # Pre: len(arr) > 0
+    # Post: len(result) == len(arr)
+    return arr
+"""
+result = verify_contract(code)  # now a real, checked verification
+
+code = """
+def f(s):
+    # Pre: s == "hello world"
+    # Post: str_contains(s, "world")
+    return s
+"""
+result = verify_contract(code)  # backed by real Z3 String theory
 ```
+
+**Not yet integrated:** quantified loop invariants (`# Inv: all(...)`) currently degrade to an honest `skipped` result rather than being proven inductively -- see `roadmap.md` §18.2 for why (PRESERVATION needs induction, not the single-state check quantifiers.py provides) and what the real fix would take. Float precision (`FloatWorkAround`-equivalent, e.g. approximate float comparison) is also not yet integrated -- see roadmap.md §19.3.
 
 ### Test Generator v1.1
 
@@ -528,8 +565,8 @@ python -m pytest src/ -m "not slow"
 
 | Component | Test File | Tests | Status |
 |-----------|-----------|-------|--------|
-| **master-debugger** | `src/master_debugger/tests/test_orchestration.py` | 18 | ✅ |
-| **python-debug** | `src/python_debug/tests/test_execution_tracing.py` | 25+ | ✅ |
+| **master-debugger** | `src/master_debugger/tests/test_orchestration.py` + `test_synthesis_conflict_resolution.py` | 29 | ✅ |
+| **python-debug** | `src/python_debug/tests/test_execution_tracing.py` + `test_unhandled_exception_pattern.py` | 39 | ✅ |
 | **rust-debug** | `tests/test_rust_debug_phases_2_3.py` | 21 | ✅ |
 | **cpp-debug** | `src/cpp_debug/tests/test_cpp_debug_phase4.py` | 19 | ✅ |
 | **pyprover-bridge** | `tests/test_pyprover_integration.py` | 24 | ✅ |
@@ -621,6 +658,9 @@ MIT License - See LICENSE file
 
 ## Version History
 
+- **v2.9.4** (2026-07-10): Two severe bugs fixed in the bug-detection tool's own aggregation logic, found while investigating §5's flagged conflict-resolution gap: `bug_patterns.py`'s exception dispatch only recognized 4 exception types (any other unhandled exception silently produced zero patterns, `passed=True`, despite a real captured crash); `orchestrator.py`'s synthesis logic read `report.issues_found`, which structurally could never contain static/runtime findings (only async-concurrency ones) — so a passing formal contract could silently override real crashes found elsewhere. Fixed both; added an explicit `⚠️ CONFLICT` state when streams genuinely disagree — closes roadmap.md §5's master-debugger v3.0 blind-spot item as a bug fix rather than a documentation port, since v3.0 was Claude-facing methodology text with no code to port. See CHANGELOG.md and roadmap.md §20 for full detail, including newly-found source chat links for a previously-uncatalogued master-debugger v4 and a pydebug `sys.settrace()` timing-bug fix (confirmed already correctly merged)
+- **v2.9.3** (2026-07-10): Real `len()`/`abs()`/`min()`/`max()` and string-predicate (`str_length`/`str_equals`/`str_contains`/`str_starts_with`/`str_ends_with`) support (`src/pyprover/z3_builtins.py`) across all three AST-to-Z3 translators — found by direct testing that these silently degraded to "non-arithmetic, skipped" with no warning, very likely the highest-impact gap found in this suite so far since `len()` is probably the most common function call in real contracts. String predicates use Z3's real native String theory rather than porting v6.1/v7.0's old integer-encoding workaround. Float precision explicitly deferred — see CHANGELOG.md and roadmap.md §19
+- **v2.9.2** (2026-07-10): Real `forall`/`exists` quantifier support (`src/pyprover/quantifiers.py`) and Z3-backed ghost state tracking (`src/pyprover/ghost_state.py`), wired into `ContractVerifier`'s `# Post:`/`# Pre:` scanning — replaces every prior branch's quantifier "support" (all of which turned out to be a hardcoded string template or a regex match that discarded the quantified condition). Loop-invariant integration deliberately deferred, not silently skipped — see CHANGELOG.md and roadmap.md §18 for full detail including two real bugs found by this work's own tests before shipping
 - **v2.9.1** (2026-07-10): Two real stubs found and fixed (`MasterDebugger.classify_risk()`, `RustDebugger.phase_2_formal()`) by body-diffing every shared file against the real sibling v2.5.2 archive, not just comparing function names — see CHANGELOG.md for full detail, including what this means for confidence in earlier "verified superset" claims against the other six archives
 - **v2.9.0** (2026-07-10): New `EquivalenceVerifier` (`src/pyprover/equivalence_verifier.py`) — real code-to-code equivalence checking and Z3-backed simplification, built in direct response to v2.8.0's own documentation clarifying that `ContractSimplifier` doesn't do this — see CHANGELOG.md for full detail
   - `verify_function_equivalence()`: symbolic execution + Z3 proof that two functions compute the same result for all inputs (straight-line/branching arithmetic, bounded loops)

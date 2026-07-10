@@ -38,6 +38,8 @@ try:
 except ImportError:
     Z3_AVAILABLE = False
 
+from . import z3_builtins
+
 
 # ---------------------------------------------------------------------------
 # Data classes (from recovered fragment, now with complete implementations)
@@ -139,6 +141,8 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
     if isinstance(node, ast.Constant):
         if isinstance(node.value, bool):
             return z3.BoolVal(node.value)
+        if isinstance(node.value, str):
+            return z3.StringVal(node.value)
         return node.value
     if isinstance(node, ast.Name):
         if node.id == "True":
@@ -179,6 +183,11 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
             result = part if result is None else z3.And(result, part)
             left = right
         return result
+    if isinstance(node, ast.Call):
+        result = z3_builtins.try_call_to_z3(node, env, _expr_to_z3)
+        if result is not None:
+            return result
+        raise NotImplementedError(f"Unsupported call: {ast.dump(node.func)}")
     raise NotImplementedError(f"Unsupported node type: {type(node).__name__}")
 
 
@@ -293,6 +302,7 @@ class ContractSimplifier:
             return result
 
         env: Dict[str, Any] = {}
+        z3_builtins.seed_string_env(requires + ensures, env)
 
         # Parse all clauses up front — unparseable ones are kept automatically
         parsed_req = {c: _clause_to_z3(c, env) for c in requires}

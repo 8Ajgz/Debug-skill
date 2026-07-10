@@ -53,6 +53,7 @@ class BugPatternType(Enum):
     INFINITE_LOOP = "infinite_loop"
     STACK_OVERFLOW = "recursion_limit"
     SILENT_EXCEPTION = "silent_exception_swallow"
+    UNHANDLED_EXCEPTION = "unhandled_exception"
 
 
 @dataclass
@@ -123,8 +124,59 @@ class BugPatternDetector:
                 self._detect_type_confusion()
             elif exc_type is ZeroDivisionError:
                 self._detect_division_by_zero()
+            else:
+                # Real gap found by direct testing: the four branches above
+                # are a closed set. Any other unhandled exception (NameError,
+                # AttributeError, ValueError, a custom exception, ...) fell
+                # through with no pattern added at all, even though
+                # exception_info demonstrably captured a real crash -- which
+                # meant Phase1RuntimeDebug.run()'s `passed = len(patterns)==0`
+                # reported `passed=True` for code that crashes on every call.
+                # Confirmed directly: `undefined_variable_reference_xyz` in a
+                # function body raised NameError, exception_info captured it
+                # correctly, and patterns_found was still `[]`. This branch
+                # is the fallback that closes that gap for every exception
+                # type this class doesn't have a specialized detector for.
+                self._detect_unhandled_exception()
 
         return self.patterns
+
+    def _detect_unhandled_exception(self):
+        """Fallback for any exception type without a specialized detector
+        above. Deliberately generic (no root-cause guess beyond what the
+        exception itself states) since, unlike IndexError/KeyError/
+        TypeError/ZeroDivisionError, there's no single common cause to
+        name for an arbitrary exception class -- but "the traced execution
+        crashed" is itself always worth surfacing as a finding, not silence.
+        """
+        exc_type = self.report.exception_info.get("exception_type")
+        exc_value = self.report.exception_info.get("exception_value")
+        message = self.report.exception_info.get("message") or str(exc_value or "")
+        type_name = getattr(exc_type, "__name__", str(exc_type))
+
+        self.patterns.append(DetectedPattern(
+            pattern_type=BugPatternType.UNHANDLED_EXCEPTION,
+            severity="high",
+            confidence=1.0,  # the exception is a directly observed fact, not an inference
+            description=f"Execution raised an unhandled {type_name}: {message}",
+            location=None,
+            code_snippet=None,
+            root_cause=(
+                f"The traced code raised {type_name} and nothing in the call "
+                f"path caught it, so execution terminated abnormally."
+            ),
+            suggestion=(
+                "Determine whether this exception is expected for the given "
+                "input (in which case it should be caught and handled "
+                "explicitly, or the input should be rejected earlier with a "
+                "clearer error) or whether it indicates a genuine defect in "
+                "the traced code path."
+            ),
+            fix_example=(
+                f"try:\n    ...\nexcept {type_name} as e:\n"
+                f"    # handle or re-raise with more context\n    raise"
+            ),
+        ))
 
     # ------------------------------------------------------------------
     # Individual detectors

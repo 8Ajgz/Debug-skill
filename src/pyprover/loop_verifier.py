@@ -34,6 +34,8 @@ try:
 except ImportError:
     Z3_AVAILABLE = False
 
+from . import z3_builtins
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -157,6 +159,8 @@ _OP_MAP = {
 def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
     """Recursively convert an ast.expr into a Z3 expression."""
     if isinstance(node, ast.Constant):
+        if isinstance(node.value, str):
+            return z3.StringVal(node.value)
         return node.value
     if isinstance(node, ast.Name):
         name = node.id
@@ -197,6 +201,11 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
             result = part if result is None else z3.And(result, part)
             left = right
         return result
+    if isinstance(node, ast.Call):
+        result = z3_builtins.try_call_to_z3(node, env, _expr_to_z3)
+        if result is not None:
+            return result
+        raise NotImplementedError(f"Unsupported call: {ast.dump(node.func)}")
     raise NotImplementedError(f"Unsupported node type: {type(node).__name__}")
 
 
@@ -243,6 +252,7 @@ def verify_loop_invariant(
 
     # Build initial symbolic environment from parameter names
     env: Dict[str, Any] = {name: z3.Int(name) for name in param_names}
+    z3_builtins.seed_string_env([invariant.expression], env)
 
     # ------------------------------------------------------------------
     # INIT: Is the invariant satisfiable given standard integer bounds?

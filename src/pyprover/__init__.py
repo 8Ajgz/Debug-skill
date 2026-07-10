@@ -10,6 +10,14 @@ try:
         simplify_function, propose_redundant_branch_removal,
         EquivalenceResult, SimplificationResult, UnsupportedConstructError,
     )
+    from .quantifiers import (
+        try_parse_quantifier, check_quantifier,
+        QuantifierClause, QuantifierCheckResult,
+    )
+    from .ghost_state import (
+        GhostStateTracker, GhostVariable, GhostUpdate, GhostStateResult,
+    )
+    from .z3_builtins import try_call_to_z3, infer_string_names, seed_string_env
 
     async_verifier = AsyncVerifier()
     ffi_verifier = FFIVerifier()
@@ -23,11 +31,15 @@ try:
         'verify_expression_equivalence', 'verify_function_equivalence',
         'simplify_function', 'propose_redundant_branch_removal',
         'EquivalenceResult', 'SimplificationResult', 'UnsupportedConstructError',
+        'try_parse_quantifier', 'check_quantifier',
+        'QuantifierClause', 'QuantifierCheckResult',
+        'GhostStateTracker', 'GhostVariable', 'GhostUpdate', 'GhostStateResult',
+        'try_call_to_z3', 'infer_string_names', 'seed_string_env',
     ]
 except ImportError:
     __all__ = []
 
-__version__ = "14.1"
+__version__ = "14.3"
 
 # Convenience functions
 def verify_contract(code: str, language: str = "python"):

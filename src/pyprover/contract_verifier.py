@@ -11,6 +11,9 @@ try:
 except ImportError:
     Z3_AVAILABLE = False
 
+from . import quantifiers
+from . import z3_builtins
+
 # Hardening limits (ported from the standalone PyProver v13.1 security pass,
 # adapted to this verifier's actual attack surface: it's a per-line text
 # scanner, not an expression parser, so the relevant risks are unbounded
@@ -67,6 +70,8 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
             return node.value
         if isinstance(node.value, float):
             return node.value
+        if isinstance(node.value, str):
+            return z3.StringVal(node.value)
         raise NotImplementedError(f"Unsupported constant type: {type(node.value)}")
     if isinstance(node, ast.Name):
         name = node.id
@@ -108,12 +113,34 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
             result = part if result is None else z3.And(result, part)
             left = right
         return result
+    if isinstance(node, ast.Call):
+        result = z3_builtins.try_call_to_z3(node, env, _expr_to_z3)
+        if result is not None:
+            return result
+        raise NotImplementedError(f"Unsupported call: {ast.dump(node.func)}")
     raise NotImplementedError(f"Unsupported AST node: {type(node).__name__}")
 
 
 def _clause_to_z3(clause: str, env: Dict[str, Any]) -> Optional[Any]:
-    """Parse a clause string to a Z3 expression; return None if unsupported."""
+    """Parse a clause string to a Z3 expression; return None if unsupported.
+
+    Quantified clauses (`all(cond for i in range(...))` /
+    `any(cond for i in range(...))`) are detected first and delegated to
+    quantifiers.py for real ForAll/Exists translation -- see that module's
+    docstring for why this differs from the older regex stand-in that
+    threw the quantified condition away. Everything else falls through to
+    the existing arithmetic AST translation unchanged.
+    """
     try:
+        qclause = quantifiers.try_parse_quantifier(clause)
+        if qclause is not None:
+            result = quantifiers.check_quantifier(qclause, env, _expr_to_z3)
+            if result.strategy == "unsupported":
+                return None
+            # Represent as a Z3 bool constant so downstream SAT/implication
+            # checks (which expect a Z3 BoolRef) can consume it uniformly;
+            # the real quantifier reasoning already happened above.
+            return z3.BoolVal(result.verified)
         tree = ast.parse(clause, mode="eval")
         return _expr_to_z3(tree.body, env)
     except Exception:
@@ -291,6 +318,9 @@ class ContractVerifier:
             return result
 
         env: Dict[str, Any] = {}
+        z3_builtins.seed_string_env(
+            contract.preconditions + contract.postconditions + contract.invariants, env,
+        )
 
         # ── 1. Precondition satisfiability ────────────────────────────────
         pre_z3 = [_clause_to_z3(c, env) for c in contract.preconditions]
