@@ -89,6 +89,13 @@ class BorrowCheckerParser:
                     continue
                 try:
                     diagnostic = json.loads(line)
+                    # rustc emits aggregate notes with no code and no spans
+                    # (e.g. "aborting due to N previous errors",
+                    # "some errors have detailed explanations") — these
+                    # aren't diagnostics about a location in the code and
+                    # would otherwise show up as a fake unclassified error.
+                    if not diagnostic.get('code') and not diagnostic.get('spans'):
+                        continue
                     if diagnostic.get('level') == 'error':
                         errors.append(self._parse_diagnostic(diagnostic))
                     elif diagnostic.get('level') == 'warning':
@@ -131,44 +138,75 @@ class BorrowCheckerParser:
             # Cleanup
             Path(temp_file).unlink(missing_ok=True)
     
+    # rustc error codes that mean "couldn't resolve a name/crate/import" —
+    # these fire whenever a file is compiled standalone without its Cargo
+    # dependency graph (the normal case for any real-world Rust file pulled
+    # out of its crate). They are NOT borrow-checker/ownership violations
+    # and must never be reported or risk-classified as such.
+    DEPENDENCY_RESOLUTION_CODES = {
+        "E0432": "unresolved_import",
+        "E0433": "unresolved_crate_or_module",
+        "E0405": "trait_not_in_scope",
+        "E0412": "type_not_found",
+        "E0463": "crate_not_found",
+        "E0601": "no_main_function",
+    }
+
     def _parse_diagnostic(self, diagnostic: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert rustc diagnostic to standard format."""
+        """Convert rustc diagnostic to standard format.
+
+        Note: diagnostic.get('code') can legitimately be JSON null (rustc
+        emits this on several diagnostic kinds, e.g. the trailing "aborting
+        due to N previous errors" note), so we must not chain .get() onto
+        it directly.
+        """
         spans = diagnostic.get('spans', [])
         line = spans[0]['line_start'] if spans else 1
-        
+
         message = diagnostic.get('message', '')
-        code = diagnostic.get('code', {}).get('code', '')
-        
+        code = (diagnostic.get('code') or {}).get('code', '')
+
+        error_type = self._classify_error(message, code)
+        category = (
+            "dependency_resolution"
+            if code in self.DEPENDENCY_RESOLUTION_CODES
+            else "borrow_check"
+        )
+
         return {
-            "type": self._classify_error(message, code),
+            "type": error_type,
+            "category": category,
             "message": message,
             "code": code,
             "line": line,
             "column": spans[0].get('column_start', 1) if spans else 1,
         }
-    
+
     def _classify_error(self, message: str, code: str) -> str:
         """Classify borrow checker error type."""
+        if code in self.DEPENDENCY_RESOLUTION_CODES:
+            return self.DEPENDENCY_RESOLUTION_CODES[code]
+
         msg_lower = message.lower()
-        
+
         if "cannot borrow" in msg_lower:
             if "as mutable" in msg_lower:
                 return "double_borrow_mut"
             return "borrow_conflict"
-        
+
         if "use of moved value" in msg_lower:
             return "use_after_move"
-        
+
         if "does not live long enough" in msg_lower:
             return "lifetime_mismatch"
-        
+
         if "cannot move" in msg_lower:
             return "move_violation"
-        
+
         if "multiple mutable" in msg_lower:
             return "double_borrow"
-        
-        return f"borrow_error_{code}"
+
+        return f"borrow_error_{code}" if code else "borrow_error_unknown"
 
 
 class RustBugPatternDetector:
@@ -207,12 +245,21 @@ class RustBugPatternDetector:
         errors: List[Dict[str, Any]],
         warnings: List[Dict[str, Any]],
     ) -> List[BugPattern]:
-        """Detect patterns from borrow checker diagnostics."""
+        """Detect true borrow-checker/ownership patterns from diagnostics.
+
+        Only errors categorized as "borrow_check" (see
+        BorrowCheckerParser._parse_diagnostic) are eligible — dependency
+        resolution errors (missing crate, unresolved import, trait not in
+        scope, no main fn) are compilation-environment noise, not memory
+        safety findings, and are handled separately by the caller.
+        """
         from ..common.interop import ComponentType, LanguageType
-        
+
         patterns = []
-        
+
         for error in errors:
+            if error.get("category") != "borrow_check":
+                continue
             error_type = error.get("type", "")
             if error_type in self.PATTERNS:
                 template = self.PATTERNS[error_type]
@@ -225,7 +272,7 @@ class RustBugPatternDetector:
                     language=LanguageType.RUST,
                 )
                 patterns.append(pattern)
-        
+
         return patterns
 
 

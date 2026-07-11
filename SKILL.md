@@ -18,14 +18,22 @@ description: >
 compatibility: "Python 3.8+; z3-solver for formal verification; Rust toolchain (rustc+clippy, or apt package rust-clippy) recommended for Rust; Clang and cppcheck recommended for C/C++; valgrind recommended for C dynamic memory-error detection; CBMC 6.x for symbolic execution (flag names changed from 5.x - see CHANGELOG 2.6.0); bandit and semgrep recommended for Python security analysis (semgrep uses a locally-bundled ruleset, not the semgrep.dev registry); lief recommended for C/C++ binary hardening analysis"
 
 metadata:
-  version: 2.9.4
+  version: 2.9.5
   status: production
   interop_level: 4
 ---
 
-# Debug Suite v2.9.4
+# Debug Suite v2.9.5
 
-**Status:** Production Ready | **Components:** 19 | **Test suite:** 371/371 (this sandbox; optional-tool skip count varies by environment — see CHANGELOG)
+**Status:** Production Ready | **Components:** 19 | **Test suite:** 427/427 (this sandbox; optional-tool skip count varies by environment — see CHANGELOG)
+
+**NEW in v2.9.5 (STUBS.md inventory: all STUB items fixed):**
+- `RustDebugger` Phase 0: real static analysis (delimiter balance + `todo!()`/`unimplemented!()`/`unreachable!()` detection) replacing the hardcoded `phase_0_ok = True` placeholder, now wired into `debug()`'s actual risk classification.
+- `test_generator`: every metamorphic-relation test type (not just symmetry) used to emit empty `inputs={}`, silently producing a no-op `pass` test; now generates real, type-sampled inputs and a real assertion per relation, verified end-to-end against both correct and broken implementations. `run_tests()`/`measure_coverage()` now really invoke pytest/coverage.py or Jest, replacing hardcoded-zero stubs. `run_fuzzing()`'s hardcoded `coverage_estimate: 0.75` replaced with a real measurement (or honest `None`).
+- `javascript_debug`: `JavaScriptDebugger.execute_with_debug()`/`analyze_patterns()` were a bare `pass`; now really invoke Node.js. Found and fixed two real, 100%-reproducible bugs in `debug-engine.js` this uncovered: an unclosed `logVariable()` call (syntax error on every declaration) and a missing `return value` (every instrumented variable silently became `undefined`).
+- `troubleshooting/diagnostics.py`'s three previously-dead, always-fake-result classes (`UniversalTroubleshooter`, `ToolDiagnostician`, `HealthChecker`) are now real and exported from `__init__.py`.
+- Version-string drift across `src/__init__.py`/`INTEROP.yaml`/`MANIFEST.txt`/`SKILL.md` reconciled to 2.9.5.
+- 44 new tests. See CHANGELOG.md [2.9.5] for full detail.
 
 **NEW in v2.9.1 (this release — two real stubs found and fixed, plus a merge-methodology gap):**
 - `MasterDebugger.classify_risk()` (v6, `orchestrator.py`) was a hardcoded stub returning `{"risk_level": "medium", "score": 0.5}` for every input — replaced with the real pattern-based classifier from the actual sibling v2.5.2 archive.

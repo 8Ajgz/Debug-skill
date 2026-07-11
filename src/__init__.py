@@ -1,20 +1,26 @@
-"""Verification-Debugging-Suite v2.6.1 - Production Ready
+"""Verification-Debugging-Suite v2.9.5 - Production Ready
 
 Unified verification and debugging orchestrator combining:
 - PyProver v14.1 (formal verification with Z3, loop invariants, contract simplification)
 - Python-Debug v12.3 (runtime debugging), now with working bandit + semgrep security static analysis in Phase 0 (v2.6.1)
-- Test-Generator v1.1 (comprehensive test generation)
+- Test-Generator v1.1 (comprehensive test generation, now with real pytest/jest execution and
+  coverage.py/jest --coverage measurement, real metamorphic-relation assertions, and a real
+  measured-or-honestly-null coverage_estimate in fuzzing, as of v2.9.5)
 - Master-Debugger-v5 (4-phase orchestration, unified RiskLevel as of v2.6.1)
 - Code-Orchestrator v1.1 (codebase analysis)
-- Troubleshooting v1.0 (universal diagnostics)
+- Troubleshooting v1.0 (universal diagnostics: symptom-classification-aware fix
+  suggestions, exception-aware PyProver failure diagnosis, and real cross-suite
+  tool-availability health checks, as of v2.9.5)
 - C/C++-Debug (Phase 4: Clang diagnostics + Static Analyzer + cppcheck second opinion + lief binary hardening)
 - DWARF/Symbolic-Debug (Phases 5-6: DWARF binary analysis, CBMC/KLEE symbolic execution)
 - C-Debug (Phase 7: strace syscall tracing + valgrind memcheck dynamic memory-error detection)
 - Assembly-Debug (Phases 8-10: Capstone disassembly/CFG, taint dataflow, angr symbolic execution)
-- Rust-Debug (Phases 2-3: borrow checker + clippy, now with honest tool-availability reporting)
+- Rust-Debug (Phases 0-3: real Phase 0 static analysis (delimiter balance +
+  incomplete-code markers, as of v2.9.5) + borrow checker + clippy, with honest
+  tool-availability reporting)
 """
 
-__version__ = "2.6.1"
+__version__ = "2.9.5"
 __author__ = "Anthropic Claude"
 
 # Core exports
@@ -26,6 +32,7 @@ from src.pyprover.async_verifier import AsyncVerifier
 from src.pyprover.ffi_verifier import FFIVerifier
 from src.pyprover.token_profiler import TokenProfiler
 from src.troubleshooting.phases_5 import Troubleshooter
+from src.troubleshooting.diagnostics import UniversalTroubleshooter, ToolDiagnostician, HealthChecker
 from src.code_orchestrator.orchestrator import CodeOrchestrator
 
 # PyProver v14.1 additions (loop invariant verification + contract simplification)
@@ -85,6 +92,9 @@ __all__ = [
     'ContractSimplificationResult',
     # Troubleshooting
     'Troubleshooter',
+    'UniversalTroubleshooter',
+    'ToolDiagnostician',
+    'HealthChecker',
     # Code Orchestrator
     'CodeOrchestrator',
     # Cross-language bridge

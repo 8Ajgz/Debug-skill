@@ -7,6 +7,11 @@ Core module for generating comprehensive test suites for Python and JavaScript f
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Any
 import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
 
 
 @dataclass
@@ -16,6 +21,9 @@ class TestCase:
     inputs: Dict[str, Any]
     expected_output: Any
     test_type: str  # "boundary", "mutation", "metamorphic", "fuzzing"
+    relation: Optional[str] = None  # metamorphic relation tag (e.g. "symmetry"),
+    # used by _format_pytest/_format_jest to emit a real assertion instead of
+    # a placeholder body. None for non-metamorphic test types.
 
 
 @dataclass
@@ -84,7 +92,12 @@ def generate_tests(
     coverage_report = {}
     fuzzing_tests = []
     if include_fuzzing:
-        fuzzing_tests, coverage_report = run_fuzzing(code, language)
+        # Format the tests already generated so run_fuzzing can measure
+        # real current coverage against them, rather than guessing.
+        existing_test_code = format_tests(
+            test_cases + metamorphic_tests, language, [], func_name=metadata.get("name", "unknown")
+        )
+        fuzzing_tests, coverage_report = run_fuzzing(code, language, existing_test_code=existing_test_code)
     
     # Phase 5b: RED TEAM TESTING (NEW)
     red_team_tests = []
@@ -335,35 +348,93 @@ def generate_concrete_tests(metadata: Dict, target_coverage: float) -> List[Test
     return tests
 
 
+def _sample_value(param_type: str, variant: int = 0):
+    """Generate a concrete sample value for a parameter type. `variant`
+    selects a different-but-still-valid value so multi-argument
+    metamorphic tests (symmetry, associativity, triangle inequality...)
+    get genuinely distinct inputs rather than the same value repeated.
+    """
+    t = (param_type or "").lower()
+    if "bool" in t:
+        return [True, False, True, False][variant % 4]
+    if "int" in t:
+        return [5, 12, 3, 9][variant % 4]
+    if "float" in t:
+        return [3.14, 2.5, 7.0, 1.5][variant % 4]
+    if "list" in t or "array" in t:
+        return [[1, 2, 3], [4, 5], [9], [2, 2, 1]][variant % 4]
+    if "str" in t:
+        return ["test", "sample", "abc", "xyz"][variant % 4]
+    return [5, 12, 3, 9][variant % 4]  # unknown/untyped: default to numeric
+
+
 def generate_metamorphic_tests(metadata: Dict) -> tuple:
-    """Generate metamorphic tests (relationship-based)."""
+    """Generate metamorphic tests (relationship-based).
+
+    Each matched pattern gets concrete, type-appropriate sample inputs
+    (`_sample_value`) under abstract keys ("a", "b", "c") plus a
+    `relation` tag. `_format_pytest`/`_format_jest` use `relation` to emit
+    a real assertion reflecting that mathematical property (e.g.
+    symmetry -> f(a,b) == f(b,a)), replacing the previous `inputs={}`
+    placeholder that always fell through to a bare `pass`/`TODO` body
+    for every single metamorphic test type (see STUBS.md).
+
+    Abstract keys ("a"/"b"/"c") rather than the function's real
+    parameter names are used deliberately: relations like associativity
+    and triangle inequality need 3 sample quantities even when the
+    function itself only takes 2 positional params, so the formatter
+    calls the function positionally rather than by keyword.
+
+    Two relations can't be turned into a real equality assertion from
+    function metadata alone and get an honestly-scoped smoke test
+    (call once, assert it doesn't raise) instead of a fabricated
+    assertion: "inverse" (needs a paired decode/encode function this
+    metadata doesn't identify) and "generic" (no property matched at
+    all). This is a documented, intentional scope limit, not a
+    remaining stub.
+    """
     tests = []
     report = {
         "patterns_found": 0,
         "tests_generated": 0,
         "patterns": [],
     }
-    
+
     func_name = metadata["name"]
     docstring = (metadata.get("docstring", "") or "").lower()
     params = metadata.get("params", [])
-    
-    # Pattern matching rules based on function name and docstring semantics
     patterns_matched = []
-    
+    abstract_keys = ["a", "b", "c", "d"]
+
+    def relation_inputs(count):
+        """Concrete inputs dict for `count` abstract quantities, typed
+        from the corresponding real parameter when one exists, else
+        falling back to the first parameter's type."""
+        result = {}
+        for i in range(count):
+            if i < len(params):
+                ptype = params[i].get("type", "")
+            elif params:
+                ptype = params[0].get("type", "")
+            else:
+                ptype = ""
+            result[abstract_keys[i]] = _sample_value(ptype, variant=i)
+        return result
+
     # Symmetry: f(a, b) == f(b, a)
-    if ("distance" in func_name or "compare" in func_name or 
+    if ("distance" in func_name or "compare" in func_name or
         "similarity" in docstring or "distance" in docstring or
         "commutative" in docstring):
         if len(params) >= 2:
             patterns_matched.append("symmetry")
             tests.append(TestCase(
                 name=f"test_{func_name}_symmetry",
-                inputs={},  # Placeholder
+                inputs=relation_inputs(2),
                 expected_output=None,
                 test_type="metamorphic",
+                relation="symmetry",
             ))
-    
+
     # Idempotence: f(f(x)) == f(x)
     if ("sort" in func_name or "normalize" in func_name or "unique" in func_name or
         "deduplicate" in docstring or "idempotent" in docstring or
@@ -371,57 +442,65 @@ def generate_metamorphic_tests(metadata: Dict) -> tuple:
         patterns_matched.append("idempotence")
         tests.append(TestCase(
             name=f"test_{func_name}_idempotence",
-            inputs={},
+            inputs=relation_inputs(1),
             expected_output=None,
             test_type="metamorphic",
+            relation="idempotence",
         ))
-    
-    # Reflexivity: f(x, x) == identity
-    if ("distance" in func_name or "diff" in func_name or 
+
+    # Reflexivity: f(x, x) == 0 (distance/diff to self is zero)
+    if ("distance" in func_name or "diff" in func_name or
         "reflexive" in docstring or "self" in docstring):
         if len(params) >= 2:
             patterns_matched.append("reflexivity")
             tests.append(TestCase(
                 name=f"test_{func_name}_reflexivity",
-                inputs={},
+                inputs=relation_inputs(1),  # single value, reused for both args
                 expected_output=None,
                 test_type="metamorphic",
+                relation="reflexivity",
             ))
-    
-    # Monotonicity: x < y => f(x) <= f(y)
+
+    # Monotonicity: x < y => f(x) <= f(y). Values are fixed, ordered
+    # numerics regardless of declared param type (sqrt/log/abs/etc. all
+    # take numeric args), so a < b is guaranteed rather than inferred.
     if ("sqrt" in func_name or "log" in func_name or "abs" in func_name or
         "magnitude" in docstring or "monotonic" in docstring or
         "increasing" in docstring):
         patterns_matched.append("monotonicity")
         tests.append(TestCase(
             name=f"test_{func_name}_monotonicity",
-            inputs={},
+            inputs={"a": 3, "b": 10},
             expected_output=None,
             test_type="metamorphic",
+            relation="monotonicity",
         ))
-    
+
     # Length/size preservation (for collections)
     if ("sort" in func_name or "filter" in func_name or "process" in func_name or
         "length" in docstring or "size" in docstring or "preserve" in docstring):
         patterns_matched.append("length_preservation")
         tests.append(TestCase(
             name=f"test_{func_name}_length_preserved",
-            inputs={},
+            inputs=relation_inputs(1),
             expected_output=None,
             test_type="metamorphic",
+            relation="length_preservation",
         ))
-    
-    # Inverse/Reversibility: f(g(x)) == x
+
+    # Inverse/Reversibility: f(g(x)) == x -- no paired inverse function is
+    # identifiable from metadata alone, so this stays a scoped smoke test.
     if ("encrypt" in func_name or "decode" in func_name or "decompress" in func_name or
         "encode" in docstring or "serializ" in docstring or "reversib" in docstring):
         patterns_matched.append("inverse")
         tests.append(TestCase(
             name=f"test_{func_name}_inverse",
-            inputs={},
+            inputs=relation_inputs(1),
             expected_output=None,
             test_type="metamorphic",
+            relation="inverse",
         ))
-    
+
     # Associativity: f(f(a,b),c) == f(a,f(b,c))
     if ("sum" in func_name or "concat" in func_name or "combine" in func_name or
         "associative" in docstring or "fold" in docstring):
@@ -429,11 +508,12 @@ def generate_metamorphic_tests(metadata: Dict) -> tuple:
             patterns_matched.append("associativity")
             tests.append(TestCase(
                 name=f"test_{func_name}_associativity",
-                inputs={},
+                inputs=relation_inputs(3),
                 expected_output=None,
                 test_type="metamorphic",
+                relation="associativity",
             ))
-    
+
     # Triangle inequality: f(a,c) <= f(a,b) + f(b,c)
     if ("distance" in func_name or "cost" in func_name or "path" in func_name or
         "triangle" in docstring or "shortest" in docstring):
@@ -441,38 +521,40 @@ def generate_metamorphic_tests(metadata: Dict) -> tuple:
             patterns_matched.append("triangle_inequality")
             tests.append(TestCase(
                 name=f"test_{func_name}_triangle_inequality",
-                inputs={},
+                inputs=relation_inputs(3),
                 expected_output=None,
                 test_type="metamorphic",
+                relation="triangle_inequality",
             ))
-    
+
     # Permutation preservation (for sort, filter, etc)
     if ("sort" in func_name or "filter" in func_name or "process" in func_name or
         "permutation" in docstring or "reorder" in docstring):
         patterns_matched.append("permutation_preserved")
         tests.append(TestCase(
             name=f"test_{func_name}_permutation_preserved",
-            inputs={},
+            inputs=relation_inputs(1),
             expected_output=None,
             test_type="metamorphic",
+            relation="permutation_preserved",
         ))
-    
-    # If no patterns matched, add a generic test
+
+    # If no patterns matched, add a generic smoke-test placeholder
     if not patterns_matched:
         tests.append(TestCase(
             name=f"test_{func_name}_basic_property",
-            inputs={},
+            inputs=relation_inputs(len(params)) if params else {},
             expected_output=None,
             test_type="metamorphic",
+            relation="generic",
         ))
         patterns_matched.append("generic")
-    
+
     report["patterns_found"] = len(patterns_matched)
     report["tests_generated"] = len(tests)
     report["patterns"] = patterns_matched
-    
-    return tests, report
 
+    return tests, report
 
 def analyze_mutations(code: str, test_cases: List[TestCase], language: str) -> Dict:
     """Inject mutations and measure test quality."""
@@ -677,21 +759,60 @@ def _generate_mutation_recommendations(mutations: List[Dict], killed: int) -> Li
     return recommendations
 
 
-def run_fuzzing(code: str, language: str) -> tuple:
-    """Coverage-guided fuzzing to find uncovered paths."""
-    # Stub: In production, use coverage.py to track coverage
-    # For now, identify potential uncovered branches
-    
+def run_fuzzing(code: str, language: str, existing_test_code: str = "") -> tuple:
+    """Coverage-guided fuzzing: find branch-like constructs (if/for/while/
+    try) worth targeting, and report how well `existing_test_code`
+    currently covers this code.
+
+    When `existing_test_code` is provided, `coverage_estimate` is a real
+    measurement via `measure_coverage()` (real pytest+coverage.py or
+    jest --coverage execution), and `uncovered_conditions` is filtered
+    down to constructs whose line actually shows up in the real
+    coverage report's missing lines.
+
+    Without `existing_test_code` (the backward-compatible default),
+    there is no test execution to measure against, so `coverage_estimate`
+    is honestly `None` with an explanatory message, rather than the
+    previous hardcoded `0.75` that was returned unconditionally
+    regardless of input (see STUBS.md) — a constant conveys false
+    precision here that no real measurement backs up.
+    """
     import ast
-    
+
     try:
         tree = ast.parse(code)
-    except:
+    except Exception:
         return [], {"message": "Could not parse code"}
-    
+
     # Find conditional branches
-    uncovered_paths = _find_uncovered_paths(tree)
-    
+    candidate_paths = _find_uncovered_paths(tree)
+
+    coverage_estimate = None
+    coverage_source = "no existing_test_code provided — coverage cannot be estimated without executing tests"
+    uncovered_paths = candidate_paths
+
+    if existing_test_code and language in ("python", "javascript"):
+        cov = measure_coverage(code, existing_test_code, language)
+        if cov.get("tool_available"):
+            coverage_estimate = cov["line_coverage"]
+            tool = "coverage.py" if language == "python" else "jest --coverage"
+            coverage_source = f"measured via {tool} against existing_test_code"
+            missing_lines = set(cov.get("missing_lines", []))
+            if missing_lines:
+                # Real data available: a construct is genuinely uncovered
+                # if any line in its span (header through body) is
+                # missing — its own header line is rarely the uncovered
+                # one; the untested branch body is.
+                uncovered_paths = [
+                    p for p in candidate_paths
+                    if missing_lines & set(range(p["line"], p.get("end_line", p["line"]) + 1))
+                ]
+            elif cov.get("missing_lines") == []:
+                # Measured, and nothing is missing: no real gaps.
+                uncovered_paths = []
+        else:
+            coverage_source = f"tool unavailable ({cov.get('message', 'unknown reason')}) — falling back to unmeasured branch listing"
+
     # Generate tests for each uncovered path
     tests = []
     for path in uncovered_paths[:5]:  # Limit to 5
@@ -705,7 +826,8 @@ def run_fuzzing(code: str, language: str) -> tuple:
     report = {
         "uncovered_branches": len(uncovered_paths),
         "tests_suggested": len(tests),
-        "coverage_estimate": 0.75,  # Stub estimate
+        "coverage_estimate": coverage_estimate,
+        "coverage_estimate_source": coverage_source,
         "uncovered_conditions": [
             {
                 "line": p["line"],
@@ -729,6 +851,7 @@ def _find_uncovered_paths(tree) -> List[Dict]:
         def visit_If(self, node):
             paths.append({
                 "line": node.lineno,
+                "end_line": getattr(node, "end_lineno", node.lineno),
                 "type": "if_condition",
                 "suggested_input": "varies",
             })
@@ -737,6 +860,7 @@ def _find_uncovered_paths(tree) -> List[Dict]:
         def visit_For(self, node):
             paths.append({
                 "line": node.lineno,
+                "end_line": getattr(node, "end_lineno", node.lineno),
                 "type": "for_loop",
                 "suggested_input": "empty_list or large_list",
             })
@@ -745,6 +869,7 @@ def _find_uncovered_paths(tree) -> List[Dict]:
         def visit_While(self, node):
             paths.append({
                 "line": node.lineno,
+                "end_line": getattr(node, "end_lineno", node.lineno),
                 "type": "while_loop",
                 "suggested_input": "varies",
             })
@@ -753,6 +878,7 @@ def _find_uncovered_paths(tree) -> List[Dict]:
         def visit_Try(self, node):
             paths.append({
                 "line": node.lineno,
+                "end_line": getattr(node, "end_lineno", node.lineno),
                 "type": "exception_handler",
                 "suggested_input": "invalid_input",
             })
@@ -834,7 +960,15 @@ def _infer_expected_outputs(test_cases: List[TestCase], code: str, func_name: st
 
     updated = []
     for tc in test_cases:
-        if tc.expected_output is not None or tc.test_type in ADVERSARIAL_TYPES or not tc.inputs:
+        if (tc.expected_output is not None or tc.test_type in ADVERSARIAL_TYPES
+                or tc.test_type == "metamorphic" or not tc.inputs):
+            # Metamorphic tests are skipped here deliberately: their inputs
+            # use abstract keys ("a"/"b"/"c") rather than the function's
+            # real parameter names (see generate_metamorphic_tests), so
+            # fn(**tc.inputs) below would raise a TypeError, and their
+            # correctness comes from relating two calls, not one concrete
+            # output, so single-call inference wouldn't be meaningful
+            # even if the keys did match.
             updated.append(tc)
             continue
         try:
@@ -845,11 +979,74 @@ def _infer_expected_outputs(test_cases: List[TestCase], code: str, func_name: st
                     inputs=tc.inputs,
                     expected_output=val,
                     test_type=tc.test_type,
+                    relation=tc.relation,
                 )
         except Exception:
             pass
         updated.append(tc)
     return updated
+
+
+# Assertion templates for metamorphic relations, in Python syntax. {fn} is
+# the function under test; {a}/{b}/{c} are the formatted literal values for
+# the abstract input keys generate_metamorphic_tests() produces. "inverse"
+# and "generic" are intentionally absent (see generate_metamorphic_tests
+# docstring) and fall back to a plain smoke-test call in the formatter.
+_METAMORPHIC_PY_TEMPLATES = {
+    "symmetry": "{fn}({a}, {b}) == {fn}({b}, {a})",
+    "idempotence": "{fn}({fn}({a})) == {fn}({a})",
+    "reflexivity": "{fn}({a}, {a}) == 0",
+    "monotonicity": "{fn}({a}) <= {fn}({b})",
+    "length_preservation": "len({fn}({a})) == len({a})",
+    "associativity": "{fn}({fn}({a}, {b}), {c}) == {fn}({a}, {fn}({b}, {c}))",
+    "triangle_inequality": "{fn}({a}, {c}) <= {fn}({a}, {b}) + {fn}({b}, {c})",
+    "permutation_preserved": "sorted({fn}({a})) == sorted({a})",
+}
+
+# Same relations in JS/Jest syntax. Equality relations use JSON.stringify
+# for a cheap deep-equality check (works for the primitives/arrays
+# _sample_value produces); ordering/arithmetic relations use plain
+# operators the same as Python.
+_METAMORPHIC_JS_TEMPLATES = {
+    "symmetry": "JSON.stringify({fn}({a}, {b})) === JSON.stringify({fn}({b}, {a}))",
+    "idempotence": "JSON.stringify({fn}({fn}({a}))) === JSON.stringify({fn}({a}))",
+    "reflexivity": "{fn}({a}, {a}) === 0",
+    "monotonicity": "{fn}({a}) <= {fn}({b})",
+    "length_preservation": "{fn}({a}).length === ({a}).length",
+    "associativity": "JSON.stringify({fn}({fn}({a}, {b}), {c})) === JSON.stringify({fn}({a}, {fn}({b}, {c})))",
+    "triangle_inequality": "{fn}({a}, {c}) <= {fn}({a}, {b}) + {fn}({b}, {c})",
+    "permutation_preserved": "JSON.stringify([...{fn}({a})].sort()) === JSON.stringify([...({a})].sort())",
+}
+
+
+def _metamorphic_body_py(test_case: "TestCase", call_name: str) -> List[str]:
+    """Build the pytest body lines for a metamorphic TestCase."""
+    values = {k: _format_value(v) for k, v in test_case.inputs.items()}
+    template = _METAMORPHIC_PY_TEMPLATES.get(test_case.relation)
+    if template is None:
+        # "inverse" / "generic": no property is derivable from metadata
+        # alone (see generate_metamorphic_tests) -- an honestly-scoped
+        # smoke test (call once, must not raise) instead of a fabricated
+        # equality assertion.
+        arg_list = ", ".join(values.get(k, "") for k in sorted(values))
+        return [
+            f"    # metamorphic relation '{test_case.relation}': no equality "
+            "property is derivable from function metadata alone; this is "
+            "a smoke test only (pytest fails it if the call raises) — "
+            "it is not a correctness check.",
+            f"    {call_name}({arg_list})",
+        ]
+    try:
+        assertion = template.format(fn=call_name, **values)
+    except KeyError:
+        # Required abstract key missing (e.g. function had 0 declared
+        # params to sample from) -- degrade to the same honest smoke test.
+        return [
+            f"    # metamorphic relation '{test_case.relation}': insufficient "
+            "sample inputs to build the real assertion.",
+            f"    result = {call_name}()",
+        ]
+    return [f"    assert {assertion}"]
 
 
 def format_tests(test_cases: List[TestCase], language: str, fixtures: List[str], func_name: str = "") -> str:
@@ -884,12 +1081,11 @@ def _format_pytest(test_cases: List[TestCase], fixtures: List[str], func_name: s
     # Add test cases
     for test_case in test_cases:
         lines.append("def " + test_case.name + "():")
-        
-        # Generate test body based on inputs
-        if test_case.inputs:
-            # Use the canonical function name passed in; fall back to naive
-            # extraction only if not provided (preserves backward compatibility).
-            call_name = func_name if func_name else test_case.name.replace("test_", "").split("_")[0]
+        call_name = func_name if func_name else test_case.name.replace("test_", "").split("_")[0]
+
+        if test_case.test_type == "metamorphic":
+            lines.extend(_metamorphic_body_py(test_case, call_name))
+        elif test_case.inputs:
             args = ", ".join(f"{k}={_format_value(v)}" for k, v in test_case.inputs.items())
             lines.append(f"    result = {call_name}({args})")
             
@@ -899,13 +1095,45 @@ def _format_pytest(test_cases: List[TestCase], fixtures: List[str], func_name: s
             else:
                 lines.append(f"    assert result is not None  # TODO: Verify expected output")
         else:
-            # Placeholder test
-            lines.append("    # TODO: Implement test")
-            lines.append("    pass")
+            # No inputs were generated for this test case (e.g. the
+            # function under test takes zero parameters). A bare
+            # `pass` claims to be a test while checking nothing; call
+            # the function instead so pytest actually fails if it
+            # raises. Still not a correctness check (no assertion is
+            # derivable without inputs to reason about), so it's
+            # labeled as a smoke test rather than left silently as a
+            # no-op.
+            lines.append(f"    # No parameters to vary — smoke test only "
+                         "(fails if the call raises)")
+            lines.append(f"    {call_name}()")
         
         lines.append("")
     
     return "\n".join(lines)
+
+
+def _metamorphic_body_js(test_case: "TestCase", call_name: str) -> List[str]:
+    """Build the Jest body lines for a metamorphic TestCase."""
+    values = {k: _format_value(v, "javascript") for k, v in test_case.inputs.items()}
+    template = _METAMORPHIC_JS_TEMPLATES.get(test_case.relation)
+    if template is None:
+        arg_list = ", ".join(values.get(k, "") for k in sorted(values))
+        return [
+            f"    // metamorphic relation '{test_case.relation}': no equality "
+            "property is derivable from function metadata alone; this is "
+            "a smoke test only (Jest fails it if the call throws) — it is "
+            "not a correctness check.",
+            f"    {call_name}({arg_list});",
+        ]
+    try:
+        assertion = template.format(fn=call_name, **values)
+    except KeyError:
+        return [
+            f"    // metamorphic relation '{test_case.relation}': insufficient "
+            "sample inputs to build the real assertion.",
+            f"    {call_name}();",
+        ]
+    return [f"    expect({assertion}).toBe(true);"]
 
 
 def _format_jest(test_cases: List[TestCase], fixtures: List[str], func_name: str = "") -> str:
@@ -934,18 +1162,22 @@ def _format_jest(test_cases: List[TestCase], fixtures: List[str], func_name: str
     for test_case in test_cases:
         test_name = test_case.name.replace("test_", "").replace("_", " ")
         lines.append(f"  test('{test_name}', () => {{")
-        
-        if test_case.inputs:
-            call_name = func_name if func_name else test_case.name.replace("test_", "").split("_")[0]
-            args = ", ".join(f"{_format_value(v)}" for v in test_case.inputs.values())
+        call_name = func_name if func_name else test_case.name.replace("test_", "").split("_")[0]
+
+        if test_case.test_type == "metamorphic":
+            lines.extend(_metamorphic_body_js(test_case, call_name))
+        elif test_case.inputs:
+            args = ", ".join(f"{_format_value(v, 'javascript')}" for v in test_case.inputs.values())
             lines.append(f"    const result = {call_name}({args});")
             
             if test_case.expected_output is not None:
-                lines.append(f"    expect(result).toBe({_format_value(test_case.expected_output)});")
+                lines.append(f"    expect(result).toBe({_format_value(test_case.expected_output, 'javascript')});")
             else:
                 lines.append(f"    expect(result).toBeDefined(); // TODO: Verify expected output")
         else:
-            lines.append("    // TODO: Implement test")
+            lines.append("    // No parameters to vary — smoke test only "
+                         "(fails if the call throws)")
+            lines.append(f"    {call_name}();")
         
         lines.append("  });")
         lines.append("")
@@ -955,18 +1187,29 @@ def _format_jest(test_cases: List[TestCase], fixtures: List[str], func_name: str
     return "\n".join(lines)
 
 
-def _format_value(value):
-    """Format a value for test code."""
+def _format_value(value, language: str = "python"):
+    """Format a value for test code.
+
+    `language` matters for None/bool: Python literals (None/True/False)
+    are not valid JavaScript. Previously this always emitted Python
+    literals regardless of target language, so every Jest test
+    containing a None or boolean input value (or expected output) was
+    syntactically invalid JS (`None`/`True`/`False` are not defined) --
+    a real bug, not a stub, fixed here alongside the metamorphic-test
+    gap in STUBS.md.
+    """
     if value is None:
-        return "None"
+        return "null" if language == "javascript" else "None"
     elif isinstance(value, bool):
+        if language == "javascript":
+            return "true" if value else "false"
         return "True" if value else "False"
     elif isinstance(value, str):
         return f'"{value}"'
     elif isinstance(value, list):
-        return f"[{', '.join(_format_value(v) for v in value)}]"
+        return f"[{', '.join(_format_value(v, language) for v in value)}]"
     elif isinstance(value, dict):
-        items = ", ".join(f'"{k}": {_format_value(v)}' for k, v in value.items())
+        items = ", ".join(f'"{k}": {_format_value(v, language)}' for k, v in value.items())
         return f"{{{items}}}"
     else:
         return str(value)
@@ -1000,16 +1243,307 @@ def generate_recommendations(mutation_report: Dict, coverage_report: Dict) -> Li
 
 
 # Utility functions
-def run_tests(test_code: str, language: str = "python") -> Dict:
-    """Execute generated tests and return results."""
-    # Stub: Run via pytest/jest
-    return {"passed": 0, "failed": 0, "message": "Test execution requires pytest/jest installed"}
+
+def run_tests(test_code: str, language: str = "python", source_code: str = "") -> Dict:
+    """Execute generated tests via real pytest (Python) or Jest (JS).
+
+    Replaces the previous stub, which always returned
+    ``{"passed": 0, "failed": 0, ...}`` regardless of whether pytest/jest
+    were installed or whether the tests would actually pass (see
+    STUBS.md). Degrades honestly, matching the tool-availability
+    convention used elsewhere in this suite (rust_debug/cpp_debug): if
+    the runner isn't available, that's reported explicitly rather than
+    silently returned as "0 passed, 0 failed" (which looks identical to
+    "ran cleanly, no tests").
+
+    `source_code` is optional: generated test bodies call the function
+    under test directly with no import statement (see _format_pytest/
+    _format_jest), so if the test code doesn't already define it,
+    `source_code` is prepended so the combined file can actually run.
+    """
+    if language == "python":
+        return _run_pytest(test_code, source_code)
+    elif language == "javascript":
+        return _run_jest(test_code, source_code)
+    return {"passed": 0, "failed": 0, "errors": 0, "tool_available": False,
+            "message": f"Unsupported language: {language}"}
+
+
+def _run_pytest(test_code: str, source_code: str = "") -> Dict:
+    if shutil.which("pytest") is None:
+        # Fall back to `python3 -m pytest` (works even if the `pytest`
+        # console script isn't on PATH but the package is installed).
+        try:
+            subprocess.run(["python3", "-m", "pytest", "--version"],
+                            capture_output=True, timeout=5, check=True)
+            runner = ["python3", "-m", "pytest"]
+        except Exception:
+            return {"passed": 0, "failed": 0, "errors": 0, "tool_available": False,
+                    "message": "pytest is not installed — test execution was not performed"}
+    else:
+        runner = ["pytest"]
+
+    combined = (source_code + "\n\n" + test_code) if source_code else test_code
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_path = os.path.join(tmpdir, "test_generated.py")
+        with open(test_path, "w") as f:
+            f.write(combined)
+        try:
+            proc = subprocess.run(
+                runner + [test_path, "-q", "--no-header", "-p", "no:cacheprovider"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            return {"passed": 0, "failed": 0, "errors": 0, "tool_available": True,
+                    "message": "pytest run timed out after 30s"}
+
+        output = proc.stdout + proc.stderr
+        passed = failed = errors = 0
+        m = re.search(r"(\d+) passed", output)
+        if m:
+            passed = int(m.group(1))
+        m = re.search(r"(\d+) failed", output)
+        if m:
+            failed = int(m.group(1))
+        m = re.search(r"(\d+) error", output)
+        if m:
+            errors = int(m.group(1))
+
+        failure_details = re.findall(r"FAILED (\S+)", output)
+
+        return {
+            "passed": passed,
+            "failed": failed,
+            "errors": errors,
+            "tool_available": True,
+            "returncode": proc.returncode,
+            "failures": failure_details,
+            "message": "ran via pytest" if (passed or failed or errors) else
+                       "pytest ran but reported no passed/failed/error tests "
+                       "(collection error — check raw_output)",
+            "raw_output": output[-3000:],
+        }
+
+
+_JS_FUNCTION_DECL_RE = re.compile(r'function\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(')
+
+
+def _wrap_js_source_with_exports(code: str) -> str:
+    """Append a module.exports listing every top-level `function name(...)`
+    declaration found in `code`, so a require()-ing test file (and Jest's
+    coverage instrumentation, which only tracks required modules, not the
+    test file itself — see _measure_coverage_js) can see them."""
+    names = sorted(set(_JS_FUNCTION_DECL_RE.findall(code)))
+    if not names:
+        return code
+    return code + "\nmodule.exports = { " + ", ".join(names) + " };\n"
+
+
+def _run_jest(test_code: str, source_code: str = "") -> Dict:
+    jest_bin = shutil.which("jest")
+    runner = None
+    if jest_bin:
+        runner = [jest_bin]
+    else:
+        try:
+            # `--no-install` fails fast if jest isn't already cached
+            # locally instead of attempting a real-time download, which
+            # would otherwise make every test-generator run network- and
+            # latency-dependent.
+            subprocess.run(["npx", "--no-install", "jest", "--version"],
+                            capture_output=True, timeout=10, check=True)
+            runner = ["npx", "--no-install", "jest"]
+        except Exception:
+            return {"passed": 0, "failed": 0, "errors": 0, "tool_available": False,
+                    "message": "jest is not installed (and not available via a cached "
+                               "npx install) — test execution was not performed"}
+
+    combined = (source_code + "\n\n" + test_code) if source_code else test_code
+    # Jest needs CommonJS-visible functions; the generated source/tests
+    # use plain top-level `function`/`const` declarations with no
+    # imports, which Jest can run directly without a module.exports as
+    # long as everything is in one file (functions defined before use).
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_path = os.path.join(tmpdir, "generated.test.js")
+        with open(test_path, "w") as f:
+            f.write(combined)
+        try:
+            proc = subprocess.run(
+                runner + [test_path, "--json", "--silent",
+                          "--config", '{"testEnvironment":"node","rootDir":"' + tmpdir.replace("\\", "\\\\") + '"}'],
+                capture_output=True, text=True, timeout=30, cwd=tmpdir,
+            )
+        except subprocess.TimeoutExpired:
+            return {"passed": 0, "failed": 0, "errors": 0, "tool_available": True,
+                    "message": "jest run timed out after 30s"}
+
+        try:
+            report = json.loads(proc.stdout)
+            return {
+                "passed": report.get("numPassedTests", 0),
+                "failed": report.get("numFailedTests", 0),
+                "errors": 0,
+                "tool_available": True,
+                "returncode": proc.returncode,
+                "message": "ran via jest",
+            }
+        except json.JSONDecodeError:
+            return {"passed": 0, "failed": 0, "errors": 0, "tool_available": True,
+                    "returncode": proc.returncode,
+                    "message": "jest ran but its output could not be parsed as JSON "
+                               "(likely a syntax error in the generated file)",
+                    "raw_output": (proc.stdout + proc.stderr)[-3000:]}
 
 
 def measure_coverage(code: str, test_code: str, language: str = "python") -> Dict:
-    """Measure line and branch coverage."""
-    # Stub: Use coverage.py for Python
-    return {"line_coverage": 0.0, "branch_coverage": 0.0}
+    """Measure real line and branch coverage via coverage.py (Python) or
+    Jest's built-in coverage (JavaScript).
+
+    Replaces the previous stub, which always returned
+    ``{"line_coverage": 0.0, "branch_coverage": 0.0}`` regardless of the
+    code/tests passed in (see STUBS.md).
+    """
+    if language == "python":
+        return _measure_coverage_python(code, test_code)
+    elif language == "javascript":
+        return _measure_coverage_js(code, test_code)
+    return {"line_coverage": 0.0, "branch_coverage": 0.0, "tool_available": False,
+            "message": f"Unsupported language: {language}"}
+
+
+def _measure_coverage_python(code: str, test_code: str) -> Dict:
+    try:
+        subprocess.run(["python3", "-m", "coverage", "--version"],
+                        capture_output=True, timeout=5, check=True)
+    except Exception:
+        return {"line_coverage": 0.0, "branch_coverage": 0.0, "tool_available": False,
+                "message": "coverage.py is not installed — coverage was not measured"}
+
+    combined = code + "\n\n" + test_code
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_path = os.path.join(tmpdir, "test_generated.py")
+        data_path = os.path.join(tmpdir, ".coverage")
+        json_path = os.path.join(tmpdir, "coverage.json")
+        with open(test_path, "w") as f:
+            f.write(combined)
+        try:
+            subprocess.run(
+                ["python3", "-m", "coverage", "run", "--branch",
+                 f"--data-file={data_path}", "-m", "pytest", test_path, "-q"],
+                capture_output=True, text=True, timeout=30, cwd=tmpdir,
+            )
+            proc = subprocess.run(
+                ["python3", "-m", "coverage", "json", f"--data-file={data_path}",
+                 "-o", json_path],
+                capture_output=True, text=True, timeout=10, cwd=tmpdir,
+            )
+        except subprocess.TimeoutExpired:
+            return {"line_coverage": 0.0, "branch_coverage": 0.0, "tool_available": True,
+                    "message": "coverage measurement timed out after 30s"}
+
+        if not os.path.exists(json_path):
+            return {"line_coverage": 0.0, "branch_coverage": 0.0, "tool_available": True,
+                    "message": "coverage run produced no data (test file likely failed "
+                               "to collect/run — see raw_output)",
+                    "raw_output": proc.stdout + proc.stderr}
+
+        with open(json_path) as f:
+            cov_data = json.load(f)
+
+        file_summary = None
+        file_data = None
+        for fname, fdata in cov_data.get("files", {}).items():
+            if fname.endswith("test_generated.py"):
+                file_data = fdata
+                file_summary = fdata.get("summary", {})
+                break
+        if file_summary is None:
+            file_summary = cov_data.get("totals", {})
+            file_data = {}
+
+        num_statements = file_summary.get("num_statements", 0)
+        covered_lines = file_summary.get("covered_lines", 0)
+        line_coverage = (covered_lines / num_statements) if num_statements else 0.0
+
+        num_branches = file_summary.get("num_branches", 0)
+        covered_branches = file_summary.get("covered_branches", 0)
+        branch_coverage = (covered_branches / num_branches) if num_branches else 0.0
+
+        return {
+            "line_coverage": round(line_coverage, 4),
+            "branch_coverage": round(branch_coverage, 4),
+            "tool_available": True,
+            "num_statements": num_statements,
+            "covered_lines": covered_lines,
+            "missing_lines": file_data.get("missing_lines", []),
+            "message": "measured via coverage.py",
+        }
+
+
+def _measure_coverage_js(code: str, test_code: str) -> Dict:
+    jest_bin = shutil.which("jest")
+    runner = [jest_bin] if jest_bin else ["npx", "--no-install", "jest"]
+    try:
+        subprocess.run(runner[:1] + ["--version"] if jest_bin else
+                        ["npx", "--no-install", "jest", "--version"],
+                        capture_output=True, timeout=10, check=True)
+    except Exception:
+        return {"line_coverage": 0.0, "branch_coverage": 0.0, "tool_available": False,
+                "message": "jest is not installed (and not available via a cached "
+                           "npx install) — coverage was not measured"}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Source and test must be separate files: Jest's coverage
+        # instrumentation only tracks required modules, not the test file
+        # itself, so a combined single file (which works fine for
+        # run_tests()'s pass/fail check) always reports zero coverage
+        # here regardless of collectCoverageFrom — confirmed by direct
+        # testing while building this fix, not assumed from docs.
+        source_path = os.path.join(tmpdir, "source.js")
+        with open(source_path, "w") as f:
+            f.write(_wrap_js_source_with_exports(code))
+
+        test_path = os.path.join(tmpdir, "generated.test.js")
+        preamble = "const __src = require('./source.js');\nObject.assign(global, __src);\n\n"
+        with open(test_path, "w") as f:
+            f.write(preamble + test_code)
+
+        cfg = json.dumps({
+            "testEnvironment": "node",
+            "rootDir": tmpdir,
+            "collectCoverage": True,
+            "collectCoverageFrom": ["source.js"],
+            "coveragePathIgnorePatterns": [],
+        })
+        try:
+            proc = subprocess.run(
+                runner + ["--config", cfg, "--coverageReporters=json-summary", "--silent"],
+                capture_output=True, text=True, timeout=30, cwd=tmpdir,
+            )
+        except subprocess.TimeoutExpired:
+            return {"line_coverage": 0.0, "branch_coverage": 0.0, "tool_available": True,
+                    "message": "jest coverage run timed out after 30s"}
+
+        summary_path = os.path.join(tmpdir, "coverage", "coverage-summary.json")
+        if not os.path.exists(summary_path):
+            return {"line_coverage": 0.0, "branch_coverage": 0.0, "tool_available": True,
+                    "message": "jest ran but produced no coverage-summary.json "
+                               "(likely a syntax error — see raw_output)",
+                    "raw_output": (proc.stdout + proc.stderr)[-3000:]}
+
+        with open(summary_path) as f:
+            summary = json.load(f)
+        totals = summary.get("total", {})
+        line_pct = totals.get("lines", {}).get("pct", 0.0)
+        branch_pct = totals.get("branches", {}).get("pct", 0.0)
+        line_pct = line_pct if isinstance(line_pct, (int, float)) else 0.0
+        branch_pct = branch_pct if isinstance(branch_pct, (int, float)) else 0.0
+        return {
+            "line_coverage": round(line_pct / 100, 4),
+            "branch_coverage": round(branch_pct / 100, 4),
+            "tool_available": True,
+            "message": "measured via jest --coverage",
+        }
 
 
 # ============================================================================

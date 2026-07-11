@@ -59,6 +59,17 @@ class DebugReport {
       timestamp: Date.now() - this.startTime,
       callStack: [...this.callStack]
     });
+
+    // instrumentCode() rewrites `let x = <rhs>;` into
+    // `let x = __report.logVariable(0, 'x', (<rhs>));`, so this method's
+    // return value becomes the actual value assigned to `x`. Previously
+    // this had no return statement (implicitly returned undefined),
+    // meaning every single instrumented variable was silently rebound to
+    // undefined regardless of its real value -- confirmed by direct
+    // execution while fixing instrumentCode()'s separate unclosed-paren
+    // bug (see instrumentCode() comment), not caught by review alone
+    // since without the paren fix this line never even ran.
+    return value;
   }
 
   logFunctionCall(lineIndex, functionName, args = {}) {
@@ -422,16 +433,67 @@ function executeWithDebug(code, globalScope = {}, options = {}) {
 }
 
 function instrumentCode(code, report) {
-  let instrumented = code;
+  // Previous implementation: a single global regex replace that turned
+  // `let x = <rhs>;` into `let x = __report.logVariable(0, 'x', <rhs>;`
+  // -- opening a call to logVariable() but never closing it. This was a
+  // 100%-reproducible syntax error for every single variable
+  // declaration in any code passed to executeWithDebug() (confirmed by
+  // direct execution while fixing the Python orchestrator around this
+  // file -- every declaration failed with "missing ) after argument
+  // list"), silently swallowed by executeWithDebug()'s catch block into
+  // a captured "exception" rather than ever actually running.
+  //
+  // Fixed by scanning for the real end of each declaration's RHS
+  // (respecting string/template-literal contents and nested brackets,
+  // so semicolons inside a string or a nested call don't terminate the
+  // statement early) and wrapping exactly that span.
+  const declRegex = /\b(?:let|const|var)\s+(\w+)\s*=\s*/g;
+  let result = '';
+  let lastIndex = 0;
+  let match;
 
-  instrumented = instrumented.replace(
-    /(?:let|const|var)\s+(\w+)\s*=\s*/g,
-    (match, varName) => {
-      return `let ${varName} = __report.logVariable(0, '${varName}', `;
+  while ((match = declRegex.exec(code)) !== null) {
+    const varName = match[1];
+    const rhsStart = match.index + match[0].length;
+    const stmtEnd = findStatementEnd(code, rhsStart);
+
+    result += code.slice(lastIndex, match.index);
+    result += `let ${varName} = __report.logVariable(0, '${varName}', (`;
+    result += code.slice(rhsStart, stmtEnd);
+    result += '))';
+
+    lastIndex = stmtEnd;
+    declRegex.lastIndex = stmtEnd;
+  }
+  result += code.slice(lastIndex);
+
+  return result;
+}
+
+function findStatementEnd(code, start) {
+  // Returns the index of the statement-terminating ';' (or end of
+  // code/enclosing block) for the RHS expression beginning at `start`,
+  // tracking bracket/paren/brace depth and string/template-literal
+  // contents so semicolons or brackets inside those don't count.
+  let depth = 0;
+  let inString = null; // one of ' " ` while inside a string/template literal
+  for (let i = start; i < code.length; i++) {
+    const c = code[i];
+    if (inString) {
+      if (c === '\\') { i++; continue; }
+      if (c === inString) inString = null;
+      continue;
     }
-  );
-
-  return instrumented;
+    if (c === '"' || c === "'" || c === '`') { inString = c; continue; }
+    if (c === '(' || c === '[' || c === '{') { depth++; continue; }
+    if (c === ')' || c === ']' || c === '}') {
+      if (depth === 0) return i; // closing something that opened before `start` (e.g. end of an enclosing block) -- treat as statement end
+      depth--;
+      continue;
+    }
+    if (c === ';' && depth === 0) return i;
+  }
+  return code.length;
 }
 
 function createInstrumentedPromise(OriginalPromise, report) {

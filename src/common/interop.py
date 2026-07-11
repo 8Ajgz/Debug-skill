@@ -303,12 +303,22 @@ class LanguageDetector:
     
     @staticmethod
     def get_debugger_for_language(language: LanguageType):
-        """Return appropriate debugger class for language."""
+        """Return appropriate debugger class for language.
+
+        Fixed 2026-07-11: both branches referenced a nonexistent
+        `verification_debugging_suite` package (this suite's actual
+        package name depends on wherever it's extracted/installed, same
+        class of bug as the one fixed in `src/__init__.py`'s top-level
+        imports). Never caught before because nothing in the suite
+        actually calls this method — `master_debugger` doesn't route
+        through `LanguageDetector` at all. Fixed to relative imports so it
+        works if/when something does start calling it.
+        """
         if language == LanguageType.JAVASCRIPT:
-            from verification_debugging_suite.javascript_debug import JavaScriptDebugger
+            from ..javascript_debug import JavaScriptDebugger
             return JavaScriptDebugger
         elif language == LanguageType.PYTHON:
-            from verification_debugging_suite.python_debug import execute_with_debug
+            from ..python_debug import execute_with_debug
             return execute_with_debug
         else:
             raise ValueError(f"No debugger for {language.value}")

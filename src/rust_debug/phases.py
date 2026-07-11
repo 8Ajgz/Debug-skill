@@ -1,7 +1,9 @@
 """
 Rust-Debug Phases 0-3
 
-Phase 0: Static analysis (AST inspection - placeholder for v0.1)
+Phase 0: Static analysis (delimiter balance + incomplete-code markers;
+         see static_analyzer.py for why this is regex-based rather than
+         a real AST, and STUBS.md for the placeholder this replaced)
 Phase 1: Runtime/Compilation (Borrow checker + Clippy)
 Phase 2: Formal verification (delegates to PyProver)
 Phase 3: Design review (unsafe/panic analysis)
@@ -17,6 +19,7 @@ from ..common.interop import (
 )
 from .borrow_checker import BorrowCheckerParser, RustBugPatternDetector
 from .clippy_linter import ClippyLinter, CliPPYMerger
+from .static_analyzer import RustStaticAnalyzer
 from ..common.interop import ComponentType, LanguageType
 
 
@@ -34,6 +37,7 @@ class RustDebugger:
         self.borrow_patterns = RustBugPatternDetector()
         self.clippy = ClippyLinter()
         self.merger = CliPPYMerger()
+        self.static_analyzer = RustStaticAnalyzer()
     
     def debug(self, code: str) -> UnifiedDebugReport:
         """
@@ -51,13 +55,27 @@ class RustDebugger:
             code=code,
         )
         
-        # Phase 0: Static (minimal for Rust - type system is the analyzer)
-        phase_0_ok = True  # Placeholder
-        
+        # Phase 0: Static analysis (delimiter balance + incomplete-code
+        # markers) - see static_analyzer.py. Runs regardless of rustc
+        # availability, so it's the only phase that gives any signal at
+        # all when the Rust toolchain isn't installed.
+        static_result = self.static_analyzer.analyze(code)
+        static_patterns = static_result.patterns
+
         # Phase 1: Runtime/Compilation (borrow checker + clippy)
         borrow_output = self.borrow_checker.parse_borrow_checker_output(code)
         borrow_errors = borrow_output.get('errors', [])
         clippy_patterns = self.clippy.run_clippy(code)
+
+        # Split diagnostics by category. "borrow_check" errors are real
+        # ownership/lifetime violations. "dependency_resolution" errors
+        # (missing crate, unresolved import, trait not in scope, no main
+        # fn) fire whenever a file is compiled standalone without its
+        # Cargo dependency graph — the normal case for any real-world Rust
+        # file pulled out of its crate — and must never be reported or
+        # risk-classified as memory-safety findings.
+        true_borrow_errors = [e for e in borrow_errors if e.get('category') == 'borrow_check']
+        dependency_errors = [e for e in borrow_errors if e.get('category') == 'dependency_resolution']
 
         # Tool availability (parse_borrow_checker_output/run_clippy degrade
         # silently to empty results when the tool isn't installed, so the
@@ -66,17 +84,30 @@ class RustDebugger:
         clippy_available = self.clippy.clippy_available
         both_available = rustc_available and clippy_available
 
-        # Convert to patterns
+        # Whether borrow-checking was actually verifiable: rustc ran, but
+        # if it never got past crate/import resolution, it never reached
+        # the borrow checker at all, so a "no violations" result would be
+        # meaningless, not reassuring.
+        borrow_check_verifiable = rustc_available and not dependency_errors
+
+        # Convert to patterns (dependency-resolution errors are excluded
+        # inside detect_patterns; they are not memory-safety findings)
         borrow_patterns = self.borrow_patterns.detect_patterns(
             borrow_output.get('errors', []),
             borrow_output.get('warnings', []),
         )
-        
-        # Merge patterns
-        all_patterns = self.merger.merge_results(borrow_patterns, clippy_patterns)
-        
-        # Classify risk
-        if borrow_errors:
+
+        # Merge patterns (static-analysis findings first, since an
+        # unbalanced-delimiter CRITICAL should be visible before anything
+        # borrow-checker/clippy-derived)
+        all_patterns = static_patterns + self.merger.merge_results(borrow_patterns, clippy_patterns)
+
+        # Classify risk. Real borrow-check errors always drive CRITICAL.
+        # Static-analysis findings (unbalanced delimiters, todo!()/
+        # unimplemented!()) participate at their own severity like any
+        # other pattern — dependency-resolution errors are the only
+        # category excluded, since they say nothing about the code itself.
+        if true_borrow_errors or any(p.severity == BugSeverity.CRITICAL for p in static_patterns):
             risk_level = RiskLevel.CRITICAL
         elif any(p.severity == BugSeverity.HIGH for p in all_patterns):
             risk_level = RiskLevel.HIGH
@@ -97,9 +128,17 @@ class RustDebugger:
         # whether patterns were found. A "no patterns" result is only
         # trustworthy if the tools that would have found them actually ran
         # (same convention as CppDebugger: confidence_score = 0.0 when the
-        # underlying tool never executed).
-        if all_patterns:
+        # underlying tool never executed) — and, specifically for Rust,
+        # only if rustc actually reached the borrow checker rather than
+        # stopping at unresolved crates/imports.
+        if true_borrow_errors:
             report.confidence_score = 0.8
+        elif not borrow_check_verifiable:
+            # rustc ran but never reached the borrow checker (dependency
+            # resolution failed first) — low confidence regardless of
+            # clippy, since the headline "borrow checker" analysis is
+            # unverified, not clean.
+            report.confidence_score = 0.2
         elif both_available:
             report.confidence_score = 0.95
         elif rustc_available or clippy_available:
@@ -108,12 +147,21 @@ class RustDebugger:
             report.confidence_score = 0.0
 
         # Summary
-        if borrow_errors:
-            report.summary = f"❌ Compilation error: {len(borrow_errors)} borrow checker violation(s)"
+        if true_borrow_errors:
+            report.summary = f"❌ Compilation error: {len(true_borrow_errors)} borrow checker violation(s)"
+        elif dependency_errors:
+            report.summary = (
+                f"⚠️  Borrow checker not verified: {len(dependency_errors)} dependency/import "
+                "resolution error(s) (missing crate, unresolved import, or similar). This file "
+                "was compiled standalone without its Cargo dependency graph, so rustc never "
+                "reached the borrow checker — this is not a memory-safety finding, and a clean "
+                "result here should not be read as 'no borrow-check issues.'"
+            )
         elif all_patterns:
-            report.summary = f"⚠️  {len(all_patterns)} issue(s) detected (Rust borrow checker + Clippy)"
+            source = "static analysis" if (static_patterns and not (rustc_available or clippy_available)) else "Rust borrow checker + Clippy + static analysis"
+            report.summary = f"⚠️  {len(all_patterns)} issue(s) detected ({source})"
         elif both_available:
-            report.summary = "✅ No borrow checker or Clippy violations"
+            report.summary = "✅ No borrow checker, Clippy, or static-analysis violations"
         elif rustc_available and not clippy_available:
             report.summary = (
                 "⚠️  No borrow checker violations found, but clippy is not installed — "
@@ -127,16 +175,21 @@ class RustDebugger:
         else:
             report.summary = (
                 "⚠️  rustc and clippy are not installed — no borrow checker or lint "
-                "analysis was performed. This result does not indicate the code is clean; "
-                "install the Rust toolchain (see rust_debug/setup.py) to get real analysis."
+                "analysis was performed (static analysis ran and found no issues, but this "
+                "does not indicate the code is clean; install the Rust toolchain, see "
+                "rust_debug/setup.py, to get real borrow-checker/lint analysis)."
             )
 
         return report
     
     def phase_0_static(self, code: str) -> bool:
-        """Phase 0: Static analysis (Rust type system does most of this)."""
-        # Placeholder - Rust's type system is already the static analyzer
-        return True
+        """Phase 0: Static analysis (delimiter balance + incomplete-code
+        markers, see static_analyzer.py). Returns whether the code passed
+        (no unbalanced delimiters and no todo!()/unimplemented!()/
+        unreachable!() markers) — call `self.static_analyzer.analyze(code)`
+        directly for the full StaticAnalysisResult with findings/patterns.
+        """
+        return self.static_analyzer.analyze(code).passed
     
     def phase_1_runtime(self, code: str) -> UnifiedDebugReport:
         """

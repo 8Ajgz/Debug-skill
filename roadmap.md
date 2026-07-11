@@ -1,7 +1,8 @@
 # Debug-Suite Roadmap
 
-**Current version:** 2.9.4 (this header line was stale at "2.2.5" for many releases — corrected 2026-07-10; treat every dated section below as the accurate historical record regardless of this line's past staleness)
-**See also:** `debug-suite-handoff.md` (distributed alongside this package, not bundled inside it) — a distilled, action-oriented handoff generated 2026-07-10 covering §12-§17 below in the fixed handoff-generator structure, with a prioritized Implementation Roadmap for the unmerged PyProver branch content identified in §13/§16. Read the handoff first for "what to do next"; read this file for the full reasoning behind any of it.
+**Current version:** 2.9.4 per CHANGELOG.md (see §21.4 for a newly-found version-string drift issue: `src/__init__.py`/`INTEROP.yaml`/`MANIFEST.txt` each claim a different, stale version — not yet reconciled)
+**Last updated:** 2026-07-11 (§21 added — real-world Rust test, a genuine `rust_debug` false-positive fixed, `troubleshooting` domain-awareness merge, full stub inventory in `STUBS.md`)
+**See also:** `debug-suite-handoff.md` (regenerated 2026-07-11 alongside this update — read it first for "what to do next"; read this file for the full reasoning behind any of it) and `STUBS.md` (new 2026-07-11, full stub/placeholder inventory referenced from §21.7).
 **This document supersedes:** the original `debug-suite-v2_1` Phase 1-3 roadmap (reproduced in §9 below, updated with current status)
 **Compiled:** June 30, 2026, from a full conversation-history search across every component skill that was merged into this suite (pyprover, python-debug, master-debugger, test-generator, code-orchestrator, troubleshooting, standardize-skill)
 
@@ -747,3 +748,61 @@ Searching for "old versions" to merge from surfaced chats beyond what §3/§5 al
 ### 20.5 Test coverage added
 
 11 new tests: `python_debug/tests/test_unhandled_exception_pattern.py` (6) and `master_debugger/tests/test_synthesis_conflict_resolution.py` (5). Two of the five orchestrator tests needed a second pass after their first version made wrong assumptions about pre-existing behavior (a hardcoded out-of-bounds index doesn't match `_detect_off_by_one`'s specific regexes; a `result`-referencing postcondition is only satisfiability-checked, not implication-checked, per `contract_verifier.py`'s own documented scope) — both corrected by testing the actual behavior directly rather than assuming, consistent with this document's standing methodology. Full suite observed locally: 391 passed, 57 skipped, 1 deselected, 0 failed (380 + 11, zero regressions).
+
+## §21. Real-world Rust test (xfce4-rs), a genuine `rust_debug` false-positive fixed, and a version-string drift finding (2026-07-11)
+
+### 21.1 What was tested and why
+
+Asked to test this suite against real code from XFCE (GitHub). XFCE's own components (Thunar, xfce4-panel, xfwm4, etc.) are C/GTK, which this suite covers via `cpp_debug`/`c_debug`, not `rust_debug` — but `xfce-mirror/xfce4-rs` (the official Rust GTK bindings repo) is a genuine Rust codebase, so `rust_debug` was exercised against `xfconf/src/binding.rs`, a real FFI wrapper file (8 `unsafe` blocks, calls into `glib`/`crate::Channel`).
+
+### 21.2 Real bug found and fixed: `rust_debug/borrow_checker.py`
+
+Two compounding issues, both confirmed against real `rustc --error-format=json` output before any fix was written:
+
+1. **Crash on null diagnostic codes.** `_parse_diagnostic()` did `diagnostic.get('code', {}).get('code', '')`. rustc legitimately emits `"code": null` on aggregate notes (e.g. the trailing `"aborting due to N previous errors"` line), so `None.get('code')` raised `AttributeError`, silently caught by the outer bare `except Exception` in `parse_borrow_checker_output()` and replacing **all** real diagnostics with one generic `compilation_error` entry — on `binding.rs` this discarded 27 legitimate, well-structured diagnostics down to nothing useful. Fixed: `code = (diagnostic.get('code') or {}).get('code', '')`, plus filtering out the no-code/no-span aggregate notes entirely before they're even classified.
+
+2. **Dependency-resolution errors misclassified as borrow-checker violations.** `BorrowCheckerParser` compiles standalone with bare `rustc`, which can't see Cargo dependencies — so any real-world Rust file with external crate deps (i.e. nearly all real Rust) produces `E0432`/`E0433`/`E0405`-class "unresolved import/crate/trait" errors before rustc ever reaches the borrow checker. The pre-fix code treated any rustc error as a borrow-check violation: `binding.rs` was reported `RiskLevel.CRITICAL`, `"28 borrow checker violation(s)"` — none of which were actually about ownership/lifetimes. Fixed by adding a `category` field (`"borrow_check"` vs `"dependency_resolution"`) to each parsed diagnostic and threading it through `detect_patterns()` and `debug()`'s risk/confidence/summary logic. Post-fix, the same file reports `RiskLevel.LOW`, confidence `0.2`, and an explicit "borrow checker not verified" summary rather than a false CRITICAL.
+
+Positive-control regression check: a genuine, dependency-free `cannot borrow as mutable` violation still correctly reports `CRITICAL`/confidence `0.8`/1 pattern — the fix narrows false positives without suppressing true ones.
+
+### 21.3 A related, previously-dormant bug: `common/interop.py`
+
+While tracing how `javascript_debug`'s `JavaScriptDebugger` gets resolved, found `LanguageDetector.get_debugger_for_language()` imports from a nonexistent `verification_debugging_suite` package in both its Python and JavaScript branches — same class of bug as the `src/__init__.py` absolute-import issue from an earlier session, just never caught because **nothing in the suite calls this method** (`master_debugger` doesn't route language detection through it at all). Fixed to relative imports (`..javascript_debug`, `..python_debug`); confirmed both branches now resolve correctly. Filed as dormant-but-real rather than live-and-wrong, since it had zero behavioral effect until now.
+
+### 21.4 Version-string drift across the package (found, not fully fixed)
+
+Cross-checking the fix above against "what version is this" turned up genuine drift between files that should agree:
+
+| File | Claimed version | Accurate? |
+|---|---|---|
+| `CHANGELOG.md` | 2.9.4 | Yes — matches actual latest dated entry |
+| `roadmap.md` (this file's own header) | 2.9.4 | Yes |
+| `src/__init__.py` (`__version__`) | 2.6.1 | **No** — stale since before §19/§20's work |
+| `INTEROP.yaml` (`version:`) | 1.2.0 | **No** — several major releases stale |
+| `MANIFEST.txt` (header) | 2.9.1 | **No** — one release behind, and the file's own body text already flags *other* parts of itself as stale without noticing its own header is too |
+| `SKILL.md` (frontmatter) | *(no version field present)* | N/A |
+
+Not fixed this pass (would mean touching `src/__init__.py`'s single most-imported line, `INTEROP.yaml`'s machine-readable metadata, and `MANIFEST.txt`'s header, each with its own downstream consumers/audit implications) — flagged here so a version-bump pass can do all four consistently in one go rather than one at a time, which is exactly the kind of piecemeal drift that produced this discrepancy in the first place.
+
+### 21.5 "Merge missing features from an older archive" — investigated, found to be a non-issue
+
+Given a separately-uploaded older `debug-suite` archive (SKILL.md `version: 1.2.0`, no `rust_debug`/`cpp_debug`/`c_debug`/`assembly_debug`) and asked to merge anything missing from it into this branch. Full file-path diff (`comm -23` on sorted `find` output from both trees) found **zero files present in the 1.2.0 archive that are absent from this one** — every path in the older archive already exists here, plus ~80 more. Spot-checked the files both archives share (`pyprover/__init__.py`, `async_verifier.py`, `contract_verifier.py`, `troubleshooting/phases_5.py`, `javascript_debug/tests/...`) and in every case this branch's version was equal or strictly better (real relative-import fixes, a corrected async-heuristic false-positive, more verifier modules, more honest docstrings) — never worse. Conclusion: the 1.2.0 archive is a strict, older subset of this branch; there was nothing to merge. (An earlier attempt at this same comparison, before re-extracting cleanly, briefly overwrote this branch's newer `pyprover` v14.1 files with the 1.2.0 archive's older v14.0 ones — caught before packaging by noticing the file-count/content diff, reverted, and redone from a clean extraction. Noted here in case any downstream artifact from that intermediate state was ever shared; the delivered package does not contain it.)
+
+### 21.6 `troubleshooting` merge: domain-awareness from the standalone skill
+
+The standalone `troubleshooting` skill (a Claude-facing SKILL.md methodology doc, not code) has a 6-phase model with explicit Code/Hardware/General domain refinements. `troubleshooting/phases_5.py`'s `Troubleshooter.diagnose()` accepted a `context` parameter since its first version but never read it anywhere in the method body — domain had zero effect on classification or remediation. Merged in: `context` now actually branches Phase 2/3 logic across `code`/`hardware`/`general` (previously only `code`-shaped logic existed regardless of what was passed); Phase 0 now flags when the domain's single-most-diagnostic-indicator looks absent from the problem description (`evidence_sufficient`/`missing_evidence_prompt`) rather than just recording string length; the SKILL.md's Anti-Patterns table is now exposed as `Troubleshooter.ANTI_PATTERNS` data, not just prose a Claude session might separately have access to. No new test file exists for this module (confirmed pre-existing gap, not introduced here — `troubleshooting/` has no `tests/` directory at all, unlike every other component in this suite).
+
+### 21.7 Stub inventory
+
+Systematic grep (`TODO`/`FIXME`/`placeholder`/`stub`/`NotImplementedError`) across all of `src/`, hand-verified hit by hit. Full detail in `STUBS.md` (new file, ships alongside `roadmap.md`). Headline findings not otherwise covered in §1-§20:
+
+- `rust_debug/phases.py`'s Phase 0 static analysis (`phase_0_static()`, `phase_0_ok`) is a hardcoded `True` — no AST inspection happens despite the name.
+- `troubleshooting/diagnostics.py` (a *different* module from `phases_5.py`, above) is almost entirely stubbed — `HealthChecker.check_all_tools()` hardcodes every tool as `"healthy"` unconditionally, `UniversalTroubleshooter._suggest_fixes()` ignores its own input and always returns one canned response. Confirmed **dead**: nothing outside this file imports these three classes, and `troubleshooting/__init__.py` only exports from `phases_5.py`.
+- `test_generator/test_generator.py`: `run_tests()` and `measure_coverage()` always return the same hardcoded zero/empty result regardless of input; `run_fuzzing()`'s `"coverage_estimate": 0.75` is a constant, not a measurement; and the generic test-body generator can emit literal `# TODO: Implement test` / `pass` into **user-facing generated output**, not just as an internal placeholder.
+- `javascript_debug/__init__.py`'s `JavaScriptDebugger` class (the Python orchestration wrapper) is `pass`-stubbed on both its methods, even though the JS it's meant to wrap (`debug-engine.js`, `bug-patterns.js`) is real and substantial. Nothing in `master_debugger` currently wires JS debugging into the orchestrated pipeline at all.
+
+Distinguished from genuinely-scoped, honestly-commented limitations that are *not* stubs: `pyprover`'s `NotImplementedError` exhaustiveness guards on unsupported AST node types (caught and degraded gracefully by every caller), and `assembly_debug`'s two documented "don't model stack memory" / "target not statically known" simplifications.
+
+### 21.8 Test suite after this session's fixes
+
+No new test files added this pass (would be the natural next step for `borrow_checker.py`'s categorization logic specifically, which — like the rest of `rust_debug` before v2.9.4 — has no dedicated test file of its own; `test_phase_2_formal.py` only covers `phase_2_formal`, not `borrow_checker.py`). Full suite after all fixes above, with `z3-solver`/`hypothesis` installed (without them, `pyprover/tests/{test_ghost_state,test_quantifiers,test_z3_builtins}.py` fail to collect — an environment gap, not a code regression): 383 passed, 57 skipped, 1 deselected, 0 failed. `src/common/tests/test_pyprover_bridge.py` fails to *collect* (`ModuleNotFoundError: No module named 'common'` — an absolute-import assuming a different `sys.path`/rootdir setup than this suite's own `pytest.ini` uses) independent of anything touched this session; not investigated further this pass.
