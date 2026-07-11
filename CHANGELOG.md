@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.9.6] - 2026-07-11 (regression fix: v2.9.5's borrow-checker category filter broke 2 existing tests; testpaths gap that hid them also fixed)
+
+### Fixed
+
+**`tests/test_rust_debug_phases_2_3.py` — `test_detect_double_borrow_pattern` and `test_detect_use_after_move_pattern`:** v2.9.5 added a `category` field to `BorrowCheckerParser._parse_diagnostic()`'s output (`"borrow_check"` vs `"dependency_resolution"`, so dependency-resolution noise like unresolved imports/crates isn't misreported as a memory-safety finding) and made `RustBugPatternDetector.detect_patterns()` require `category == "borrow_check"` to consider an error at all. These two tests build error dicts by hand and predate the `category` field, so they silently got zero patterns back instead of the expected one, with no error or warning — the same silent-regression shape this suite's own methodology notes exist to catch. Fixed by adding `"category": "borrow_check"` to both fixtures. Real production behavior was never affected: `rust_debug/phases.py`'s actual call path always builds errors via `_parse_diagnostic()`, which already sets `category` correctly; only hand-built test/caller dicts predating v2.9.5 were exposed.
+
+Added `test_uncategorized_errors_are_filtered_not_detected` to lock in the actual current contract (no `category` key, or any value other than `"borrow_check"`, means "not detected" — not "detected via a default") so this doesn't regress silently again, and so any future caller building error dicts by hand knows `category` is required.
+
+**`pytest.ini`'s `testpaths = src` never included the top-level `tests/` directory** (`tests/test_pyprover_integration.py`, `tests/test_rust_debug_phases_2_3.py`) — meaning every "N/N passing, zero regressions" count in this file and in `SKILL.md`/`MANIFEST.txt`, going back to whenever those two files were added, never actually ran them as part of the suite's own self-check. This is exactly how the regression above went undetected by v2.9.5's own "427 passed, 0 failed" dogfooding claim: that run was real and accurate for what it covered, but it didn't cover these two tests. Fixed `testpaths` to `src tests`. Full suite, single command, this sandbox: 482 passed, 60 skipped, 1 deselected, 0 failed (432 from `src/` + 50 from `tests/`, including the 1 new regression test above).
+
+### Test suite
+
+482 passed, 60 skipped, 1 deselected, 0 failed (single `pytest` run, both `src/` and `tests/` now included).
+
 ## [2.9.5] - 2026-07-11 (STUBS.md inventory: all STUB items fixed, plus version-drift reconciliation)
 
 ### Fixed

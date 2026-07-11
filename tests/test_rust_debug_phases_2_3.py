@@ -62,6 +62,7 @@ class TestBorrowCheckerPatternDetector:
                 "type": "double_borrow",
                 "message": "Cannot borrow as mutable",
                 "line": 5,
+                "category": "borrow_check",
             }
         ]
         
@@ -78,12 +79,53 @@ class TestBorrowCheckerPatternDetector:
                 "type": "use_after_move",
                 "message": "Use of moved value",
                 "line": 10,
+                "category": "borrow_check",
             }
         ]
         
         patterns = detector.detect_patterns(errors, [])
         assert len(patterns) > 0
         assert patterns[0].pattern_type == "use_after_move"
+
+    def test_uncategorized_errors_are_filtered_not_detected(self):
+        """detect_patterns() only surfaces errors tagged category="borrow_check"
+        (see borrow_checker.py's DEPENDENCY_RESOLUTION_CODES / _parse_diagnostic).
+
+        Regression coverage: v2.9.5 added this category filter to keep
+        dependency-resolution noise (unresolved crate/import/trait, no fn main)
+        out of borrow-checker findings, but it silently made detect_patterns()
+        require a "category" key with no error or warning for callers who
+        build error dicts by hand and omit it -- exactly what
+        test_detect_double_borrow_pattern/test_detect_use_after_move_pattern
+        above did until this fix. This test locks in the actual, current
+        contract: no "category" key (or any value other than "borrow_check")
+        means "not detected", not "detected via a default". Any caller
+        constructing error dicts directly (as these tests do) must include
+        category="borrow_check" explicitly, per _parse_diagnostic's real output.
+        """
+        detector = RustBugPatternDetector()
+
+        errors = [
+            {
+                "type": "double_borrow",
+                "message": "Cannot borrow as mutable",
+                "line": 5,
+                # no "category" key at all
+            }
+        ]
+        patterns = detector.detect_patterns(errors, [])
+        assert patterns == []
+
+        errors_wrong_category = [
+            {
+                "type": "double_borrow",
+                "message": "Cannot borrow as mutable",
+                "line": 5,
+                "category": "dependency_resolution",
+            }
+        ]
+        patterns = detector.detect_patterns(errors_wrong_category, [])
+        assert patterns == []
 
 
 class TestClippyLinter:

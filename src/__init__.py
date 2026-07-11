@@ -1,4 +1,4 @@
-"""Verification-Debugging-Suite v2.9.5 - Production Ready
+"""Verification-Debugging-Suite v2.9.6 - Production Ready
 
 Unified verification and debugging orchestrator combining:
 - PyProver v14.1 (formal verification with Z3, loop invariants, contract simplification)
@@ -20,7 +20,7 @@ Unified verification and debugging orchestrator combining:
   tool-availability reporting)
 """
 
-__version__ = "2.9.5"
+__version__ = "2.9.6"
 __author__ = "Anthropic Claude"
 
 # Core exports

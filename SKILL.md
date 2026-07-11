@@ -1,31 +1,34 @@
 ---
 name: debug-suite
 description: >
-  Unified debugging and verification suite for 12+ languages. Full support for Python, JavaScript, Rust
-  (Phases 2-3: borrow checker + clippy, with honest tool-availability reporting), C/C++ (Phase 4: compiler
-  diagnostics + Clang Static Analyzer + cppcheck second opinion), DWARF binary analysis (Phase 5: memory
-  layout + use-after-free heuristics via pyelftools), CBMC/KLEE symbolic execution (Phase 6: exhaustive path
-  checking), C-specific syscall tracing via strace + valgrind memcheck dynamic memory-error detection
-  (Phase 7: double-close, fd leaks, unchecked malloc, leaks, invalid read/write, use-after-free), and full
-  Assembly support (Phases 8-10: Capstone disassembly + CFG construction, register dataflow taint analysis,
-  angr symbolic execution for crash detection).
-  Combines runtime debugging, static/formal analysis (PyProver with loop invariant verification + contract
-  simplification), test generation (with expected-output inference and code-pattern red team), and problem
-  diagnosis. Features 4-phase automated debugging with risk classification, FFI boundary safety checking,
-  graceful tool degradation, and automatic regression test generation when issues are found.
-  MasterDebugger orchestrates all phases.
+  Unified debugging and formal-verification suite for 12+ languages: Python/JavaScript runtime
+  tracing and bug-pattern detection; Rust borrow-checker + clippy; C/C++ compiler diagnostics, Clang
+  Static Analyzer, cppcheck, DWARF analysis, CBMC/KLEE symbolic execution; C strace + valgrind
+  memcheck; Assembly disassembly, CFG, taint analysis, angr symbolic execution. Includes PyProver
+  (Z3-backed contract/loop-invariant verification, code equivalence checking), automated test
+  generation (metamorphic, mutation, red-team), codebase orchestration, and systematic
+  problem-diagnosis. MasterDebugger auto-routes code by language through a 4-phase pipeline (static,
+  runtime, formal, design) with risk classification and honest tool-availability reporting. Use
+  whenever debugging, verifying, testing, or diagnosing code in these languages, whenever correctness
+  (contracts, invariants, equivalence) needs proving rather than guessing, or a systematic root-cause
+  methodology is needed for any broken system, not just code.
 
 compatibility: "Python 3.8+; z3-solver for formal verification; Rust toolchain (rustc+clippy, or apt package rust-clippy) recommended for Rust; Clang and cppcheck recommended for C/C++; valgrind recommended for C dynamic memory-error detection; CBMC 6.x for symbolic execution (flag names changed from 5.x - see CHANGELOG 2.6.0); bandit and semgrep recommended for Python security analysis (semgrep uses a locally-bundled ruleset, not the semgrep.dev registry); lief recommended for C/C++ binary hardening analysis"
 
 metadata:
-  version: 2.9.5
+  version: 2.9.6
   status: production
   interop_level: 4
 ---
 
-# Debug Suite v2.9.5
+# Debug Suite v2.9.6
 
-**Status:** Production Ready | **Components:** 19 | **Test suite:** 427/427 (this sandbox; optional-tool skip count varies by environment — see CHANGELOG)
+**Status:** Production Ready | **Components:** 19 | **Test suite:** 482/482 (this sandbox, single `pytest` run covering both `src/` and the top-level `tests/` directory — see "NEW in v2.9.6" below; optional-tool skip count varies by environment — see CHANGELOG)
+
+**NEW in v2.9.6 (regression fix + testpaths gap closed):**
+- Fixed 2 tests in `tests/test_rust_debug_phases_2_3.py` broken by v2.9.5's new borrow-checker `category` filter (hand-built error fixtures predating that field silently got zero patterns back). Added a regression test locking in the filter's actual contract.
+- `pytest.ini`'s `testpaths` never included the top-level `tests/` directory, so every past "N/N passing" count in this file, CHANGELOG.md, and MANIFEST.txt never actually ran those 2 (now 3) tests — this is how the regression went undetected by v2.9.5's own dogfooding run. Fixed `testpaths` to cover both directories; single `pytest` run now reports 482 passed, 60 skipped, 0 failed.
+- See CHANGELOG.md [2.9.6] for full detail.
 
 **NEW in v2.9.5 (STUBS.md inventory: all STUB items fixed):**
 - `RustDebugger` Phase 0: real static analysis (delimiter balance + `todo!()`/`unimplemented!()`/`unreachable!()` detection) replacing the hardcoded `phase_0_ok = True` placeholder, now wired into `debug()`'s actual risk classification.
@@ -35,79 +38,7 @@ metadata:
 - Version-string drift across `src/__init__.py`/`INTEROP.yaml`/`MANIFEST.txt`/`SKILL.md` reconciled to 2.9.5.
 - 44 new tests. See CHANGELOG.md [2.9.5] for full detail.
 
-**NEW in v2.9.1 (this release — two real stubs found and fixed, plus a merge-methodology gap):**
-- `MasterDebugger.classify_risk()` (v6, `orchestrator.py`) was a hardcoded stub returning `{"risk_level": "medium", "score": 0.5}` for every input — replaced with the real pattern-based classifier from the actual sibling v2.5.2 archive.
-- `RustDebugger.phase_2_formal()` was a placeholder (`# Placeholder - would call PyProver bridge` / `return None`) — replaced with the real PyProverBridge-delegating implementation from the same archive.
-- **Found by name-based diffing missing same-named, different-body stubs**: v2.8.0's merge only compared which functions existed in each branch, not what they did — a function present in both branches with the same name but a stub body in one was invisible to that check. A full body-diff (`diff` on every shared file, not just a name-presence sweep) caught these two. See CHANGELOG.md [2.9.1] for what this means for confidence in earlier "verified superset" claims.
-- 7 new regression tests. See CHANGELOG.md [2.9.1] for full detail.
-
-**NEW in v2.9.0 (`EquivalenceVerifier`, real code-to-code equivalence checking):**
-- New `src/pyprover/equivalence_verifier.py`: proves whether two functions compute the same result for all inputs (symbolic execution + Z3), for a defined subset (straight-line/branching arithmetic, bounded loops). Not general program synthesis — explicitly, honestly narrower than that, see the module's own docstring and SKILL.md's "EquivalenceVerifier scope" note.
-- `simplify_function()`: derives a real, Z3-verified algebraic simplification of a function's computation (not a suggestion — Z3's own sound term-rewriter).
-- `propose_redundant_branch_removal()`: one hand-written, always-independently-verified rewrite pattern — not open-ended search.
-- Reachable via `PyProverBridge.verify_equivalence()` / `.simplify_function_code()`.
-- Directly answers a gap `ContractSimplifier`'s own clarified documentation (v2.8.0) explicitly named as missing.
-- 32 new tests (28 in `equivalence_verifier` itself, 4 through the bridge). Two real bugs found and fixed during development, not just at the end: a control-flow bug that rejected the common "early return" pattern as unsupported when it's actually well-defined, and a missing exception-translation path that let a raw `Z3Exception`/`NotImplementedError` escape instead of degrading to `status="unsupported"`.
-- See CHANGELOG.md [2.9.0] for full detail.
-
-**NEW in v2.8.0 (real `ContractVerifier` from the actual sibling v2.5.2 archive):**
-- `pyprover/contract_verifier.py` was a non-functional stub (own comment: "Full Z3 verification would require sophisticated SMT setup") — replaced with a real, working Z3-based implementation from the actual sibling branch archive Max uploaded. Real precondition satisfiability, postcondition validity (implication-checked), invariant satisfiability.
-- The existing `ContractVerifier` test classes were passing against the stub via vacuous assertions the whole time (`assert result is not None`-style) — now meaningfully exercised against real verification.
-- Confirms the earlier v2.7.0 reconciliation (done via `conversation_search` transcripts, before the real sibling archive was available) was accurate — three other reconciled files are byte-identical to the real thing.
-- See CHANGELOG.md [2.8.0] for full detail.
-
-**NEW in v2.7.0 (branch reconciliation with sibling v2.5.2, plus same-day follow-up work):**
-- Both `MasterDebugger` (v6, active) and `MasterDebuggerV5` (legacy) now exported from `master_debugger`
-- `pyprover_bridge._map_language_type` accepts `LanguageType` enum directly
-- `hypothesis` phantom dependency removed from `requirements.txt`
-- Bare-identifier Z3 Bool/Int crash fixed in `pyprover/contract_simplifier.py` (`_implies`/`_is_tautology`)
-- `MasterDebuggerV5`'s `input()`-hangs-forever bug fixed (stdin mocking, `execute_with_debug(mock_stdin=True)` default)
-- `tree-sitter` integration: scoped and decided (no-go for a suite-wide integration — see CHANGELOG/roadmap §12.2)
-- `SemgrepAnalyzer`/`LiefBinaryAnalyzer` test coverage gap closed (9 new tests)
-- Six-archive feature-loss audit: real `pyprover_v11_2` language-adapter source recovered (superseding an untested reconstruction), a genuine Z3 soundness bug found and fixed in it, both full-suite snapshots verified as strict subsets of current
-- See CHANGELOG.md [2.7.0] and roadmap.md §12-§13 for full detail
-
-**NEW in v2.6.1 (same-day follow-up to v2.6.0):**
-- **`RiskLevel` enum unification**: the three separate `RiskLevel` classes documented as unresolved in v2.6.0 are now one. `src.RiskLevel is common.interop.RiskLevel` (literally the same class), so `report.risk_level == src.RiskLevel.X` now works correctly for reports from every component, not just `MasterDebuggerV5`.
-- **bandit fix**: `Phase0StaticAnalysis`'s bandit integration never actually surfaced a finding on any input - its match condition (`'WARNING' in output.stdout`) never matched real bandit output. Fixed via `-f json` parsing; verified against real vulnerable code.
-- **semgrep integration** (`src/common/semgrep_analyzer.py`): pattern-based second opinion alongside bandit, using a locally-bundled 20-rule security ruleset (semgrep.dev's registry isn't reachable from sandboxed environments - see `semgrep_rules/README.md`). Adds a disclosed ~6-8s per-call latency cost.
-- **lief integration** (`src/cpp_debug/lief_analyzer.py`): compiled-binary hardening posture (PIE/NX/RELRO/stack-canary) and dangerous-import detection (`system`, `strcpy`, `gets`, ...), a capability none of the source-level C/C++ analyzers have. Found and fixed a self-inflicted risk-classifier regression during verification (hardening findings are toolchain-constant, not code-content-dependent - excluded from automatic risk scoring, available via a direct call).
-- **Known issues found, not fixed**: `MasterDebuggerV5.debug()` can hang indefinitely on traced code that calls `input()` (no stdin in sandboxed environments); `master_debugger/orchestrator.py`'s `MasterDebugger` class ("v6" per its docstring) is dead code, more capable than the exported `MasterDebuggerV5` but never wired in. Both documented in `roadmap.md` §11.9/§11.7 for a future session.
-- See `CHANGELOG.md` [2.6.1] and `roadmap.md` §11.6-§11.15 for full details.
-
-**NEW in v2.6.0:**
-- **Root `src/__init__.py` rebuilt from scratch** — the v2.5.0 archive shipped it completely empty (0 bytes), meaning `import src; src.MasterDebuggerV5(...)`-style single-import usage never actually worked despite every underlying component being real and functional. Now 59 verified exports (`hasattr`-checked, not just import-success-checked).
-- **Valgrind memcheck integration** (`src/c_debug/debugger.py`): `ValgrindRunner`/`ValgrindReport`/`valgrind_available()`, wired into `CDebugger.debug()`. Dynamic memory-error detection (leaks, invalid read/write, invalid/double free, uninitialised-value use) — the first dynamic *memory* analysis in the suite, complementing strace's dynamic *syscall* analysis.
-- **Cppcheck second-opinion static analyzer** (`src/cpp_debug/cppcheck_analyzer.py`): `CppcheckAnalyzer`/`cppcheck_available()`, wired into `CppDebugger.debug()`. Dataflow-based analysis alongside Clang/CSA's AST-diagnostic approach.
-- **RustDebugger honesty fix**: previously reported `confidence=0.95, "no violations"` even when rustc/clippy weren't installed at all. Now reports `confidence=0.0` and an explicit warning in that case.
-- **CBMC 6.x compatibility fix**: `--null-pointer-check`/`--overflow-check` (CBMC 5.x) renamed/split in CBMC 6.x, silently disabling all CBMC checking on 6.x installs (hard usage error → zero findings, indistinguishable from "checked, clean"). Fixed.
-- **rust_debug/setup.py**: now leads with apt-based install (verified working in sandboxed environments) rather than the rustup.rs curl-installer, which requires network access many sandboxes don't allow.
-- **Test count:** 355 → 359 passing (4 previously-`skipif`-skipped CBMC/cppcheck integration tests now actually exercised against real installed tools for the first time).
-
-**NEW in v2.5:**
-- **Phase 8: Assembly Disassembly & CFG** (`src/assembly_debug/disassembler.py`, `cfg.py`): Capstone-based disassembler supporting x86-64, x86-32, ARM, ARM64. Reads raw bytes or ELF `.text` sections. CFGBuilder partitions instructions into basic blocks, computes control-flow edges, detects back edges (loops via DFS), unreachable blocks, indirect jumps, and functions with no return path. 26 new tests.
-- **Phase 9: Dataflow & Taint Analysis** (`src/assembly_debug/dataflow.py`): worklist-based forward taint analysis over the CFG. Seeds function argument registers (rdi/rsi/rdx/rcx/r8/r9) as tainted; propagates through mov/add/sub/xor; reports tainted-to-memory-write, tainted-to-indirect-branch (ROP vector), and tainted-to-syscall-arg sinks. 33 new tests.
-- **Phase 10: angr Symbolic Execution** (`src/assembly_debug/symbolic.py`): loads ELF binaries into angr, runs CFGFast for function/block extraction, and drives the simulation manager to find unconstrained instruction-pointer states (buffer overflows / exploitation primitives) and concrete crashes. 27 new tests.
-- **AssemblyDebugger** (`src/assembly_debug/phases.py`): unified facade combining Phases 8-10. `debug_bytes(data, arch)`, `debug_binary(path)`, `debug_source(code, dialect)` — all return `UnifiedDebugReport`. MasterDebugger routes `language="assembly"/"asm"/"x86_64"/"arm"` to AssemblyDebugger automatically.
-- **Test count:** 265 → 355 (90 new tests across Phases 8, 9, 10).
-
-**NEW in v2.4:**
-- **Phase 5: DWARF Symbol Analysis** (`src/cpp_debug/dwarf_analyzer.py`): reads DWARF debug info from ELF binaries compiled with `-g` via pyelftools. Extracts variable/type layout (name, type, byte size, stack/global classification), detects stack-pointer escapes, void* heap allocations, and multi-pointer double-free candidates. Integrated into `CppDebugger.debug()`. 28 new tests.
-- **Phase 6: CBMC/KLEE Symbolic Execution** (`src/cpp_debug/symbolic_executor.py`): drives CBMC (primary; `apt install cbmc`) and KLEE (secondary; Docker) for exhaustive path analysis. Detects buffer overflows, null dereferences, division by zero, assertion violations, and memory leaks that compiler warnings and the Clang Static Analyzer miss. Integrated into `CppDebugger.debug()`. 35 new tests (2 skipped — no CBMC in CI).
-- **Phase 7: C-Debug** (`src/c_debug/`): dedicated C-specific debugger combining CppDebugger analysis (Phases 4-6) with strace syscall tracing. Detects double-close, write-after-close, unchecked malloc failure, unchecked open failure, and fork/exec fd-leak risk from actual program execution. `MasterDebugger` now routes `language="c"` to `CDebugger` first, falling back to `CppDebugger` if needed. 29 new tests.
-- **Test count:** 173 → 265 (92 new tests across Phases 5, 6, 7).
-
-**NEW in v2.3:**
-- **Bug fixes (all from self-analysis):** `ContractVerifier.parse_contract()` now correctly finds `# Pre:`/`# Post:`/`# Inv:` annotations (was a no-op on all real input); `Phase1RuntimeDebug` import errors fixed (Phase 1 now actually runs inside the orchestrator); `DiagnosisResult` field access fixed in Phase 3 design review; test generator emits the correct function name in generated test code; 9 dead f-strings and 2 unencoded `open()` calls cleaned up in `python_debug/debug_report.py`.
-- **LoopVerifier** (`src/pyprover/loop_verifier.py`): Z3 INIT + PRESERVATION proof obligations for while-loop invariants annotated as `# Invariant: expr`. Supports arithmetic expressions, multiple loop variables, graceful degradation if z3-solver not installed.
-- **ContractSimplifier** (`src/pyprover/contract_simplifier.py`): Iterative Z3 implication checking removes redundant `@requires`/`@ensures` **clauses from a contract spec** (not code — its only input is the list of clause strings, never a function body). Soundness-preserving: timed-out clauses are always kept. See the full "ContractSimplifier — what it actually does" note later in this file before using or describing this tool; the name invites a reasonable but incorrect guess (proving two versions of *code* equivalent), which is not what it does.
-- **EquivalenceVerifier** (`src/pyprover/equivalence_verifier.py`, new in v2.9): this is that capability — actual code-to-code equivalence, added because `ContractSimplifier` explicitly doesn't do it. `verify_function_equivalence(code_a, func_a, code_b, func_b)` symbolically executes both functions and Z3-proves their outputs equal for all inputs (or returns a concrete counterexample), for a defined subset: straight-line/branching integer+boolean code, plus bounded `for x in range(N)` loops (literal `N`, unrolled — same bounded-model-checking principle as this suite's CBMC/KLEE integration, not an invariant proof for arbitrary `N`). `simplify_function(code, func_name)` builds the same symbolic expression and hands it to Z3's own sound term-rewriter, returning a genuine algebraic simplification (e.g. a redundant nested `if` collapsing to a single comparison) — not a paraphrase or a guess. Constructs outside the supported subset (function calls, recursion, unbounded loops, list/string/dict operations, bare-boolean variables used with `and`/`or`/`not`) raise `UnsupportedConstructError` or return `status="unsupported"` with a reason — never a silent wrong answer. Read the module's own docstring before using it or explaining it to someone: it states plainly that general "find the objectively simplest equivalent program" is undecidable for arbitrary code (Rice's-theorem territory) and that this module is deliberately narrower than that. Reachable via `PyProverBridge.verify_equivalence()` / `PyProverBridge.simplify_function_code()`.
-- **FFI verifier wired** into `PyProverBridge.verify_ffi()` and `verify_loop_invariants()` — both now reachable via the bridge without direct import.
-- **Test generator → MasterDebugger wiring**: `debug_comprehensive()` now automatically generates a regression test suite via `test_generator` when issues are found (per roadmap memory instruction).
-- **Expected output inference**: test generator now executes deterministic functions with generated inputs and captures real expected values (replacing `# TODO: Verify expected output` stubs).
-- **Code-pattern red team**: red team tests now fire based on what the code does (`eval()`/`exec()` injection tests, `open()` path traversal tests) rather than only on docstring keywords.
-
-**NEW in v2.2:** C/C++-Debug (Phase 4), suite-wide bugfix pass (144/144 tests passing).
+**Earlier releases (v1.0 through v2.9.1):** full per-release detail for all of these lives in CHANGELOG.md, which is packaged alongside this file — read it before assuming a component is a stub or that a past finding wasn't fixed. Highlights: v2.9.1 fixed two hardcoded-stub regressions found by body-diffing (`MasterDebugger.classify_risk()`, `RustDebugger.phase_2_formal()`); v2.9.0 added `EquivalenceVerifier` (real code-to-code equivalence checking); v2.8.0 replaced `ContractVerifier`'s non-functional stub with a real Z3 implementation; v2.7.0 was a six-archive branch reconciliation; v2.6.0-2.6.1 added valgrind/cppcheck/semgrep/lief integrations and fixed several silent-failure bugs (bandit never matching, CBMC 6.x flag incompatibility); v2.5.0 added Assembly Phases 8-10; v2.4.0 added DWARF/CBMC-KLEE/C-Debug Phases 5-7; v2.3.0 added LoopVerifier/ContractSimplifier and fixed several self-analysis bugs; v2.2.0 added C/C++-Debug; v2.1.0 added Rust-Debug.
 
 **NEW in v2.1:** Rust-Debug (Phases 2-3).
 
@@ -628,13 +559,6 @@ The bundled PyProver is a curated subset, not a full port of the v6–v14 lineag
 
 **Assembly debug (Phases 8-10):** Phase 8 (Capstone) requires `pip install capstone`. Phase 10 (angr) requires `pip install angr` (~400 MB); use a virtualenv. Taint analysis (Phase 9) is intra-procedural and x86-64-only for now; ARM register canonicalisation is not fully implemented. The angr simulation manager uses `LAZY_SOLVES` mode and runs for 30 steps by default — complex programs may need more steps to find bugs. angr's unicorn engine is disabled in most sandbox environments (unicornlib.so not found); this limits concrete execution speed but not correctness.
 
-- **v2.5.0** (2026-07-09): Assembly Phases 8-10 — 90 new tests, 355 total
-  - Phase 8: Capstone disassembler (x86-64/32, ARM, ARM64) + CFGBuilder + CFGAnalysis (back edges, unreachable, indirect, no-return)
-  - Phase 9: Register dataflow taint analysis (x86-64 SysV ABI) with worklist fixpoint; detects taint→memory-write, taint→indirect-branch, taint→syscall
-  - Phase 10: AngrAnalyzer wrapping CFGFast + SimulationManager; collects unconstrained and errored states
-  - AssemblyDebugger facade: debug_bytes / debug_binary / debug_source
-  - MasterDebugger: routes language="assembly"/"asm"/"x86_64"/"arm"/"arm64" to AssemblyDebugger
-
 ---
 
 ## Roadmap
@@ -666,75 +590,26 @@ MIT License - See LICENSE file
 
 ## Version History
 
-- **v2.9.4** (2026-07-10): Two severe bugs fixed in the bug-detection tool's own aggregation logic, found while investigating §5's flagged conflict-resolution gap: `bug_patterns.py`'s exception dispatch only recognized 4 exception types (any other unhandled exception silently produced zero patterns, `passed=True`, despite a real captured crash); `orchestrator.py`'s synthesis logic read `report.issues_found`, which structurally could never contain static/runtime findings (only async-concurrency ones) — so a passing formal contract could silently override real crashes found elsewhere. Fixed both; added an explicit `⚠️ CONFLICT` state when streams genuinely disagree — closes roadmap.md §5's master-debugger v3.0 blind-spot item as a bug fix rather than a documentation port, since v3.0 was Claude-facing methodology text with no code to port. See CHANGELOG.md and roadmap.md §20 for full detail, including newly-found source chat links for a previously-uncatalogued master-debugger v4 and a pydebug `sys.settrace()` timing-bug fix (confirmed already correctly merged)
-- **v2.9.3** (2026-07-10): Real `len()`/`abs()`/`min()`/`max()` and string-predicate (`str_length`/`str_equals`/`str_contains`/`str_starts_with`/`str_ends_with`) support (`src/pyprover/z3_builtins.py`) across all three AST-to-Z3 translators — found by direct testing that these silently degraded to "non-arithmetic, skipped" with no warning, very likely the highest-impact gap found in this suite so far since `len()` is probably the most common function call in real contracts. String predicates use Z3's real native String theory rather than porting v6.1/v7.0's old integer-encoding workaround. Float precision explicitly deferred — see CHANGELOG.md and roadmap.md §19
-- **v2.9.2** (2026-07-10): Real `forall`/`exists` quantifier support (`src/pyprover/quantifiers.py`) and Z3-backed ghost state tracking (`src/pyprover/ghost_state.py`), wired into `ContractVerifier`'s `# Post:`/`# Pre:` scanning — replaces every prior branch's quantifier "support" (all of which turned out to be a hardcoded string template or a regex match that discarded the quantified condition). Loop-invariant integration deliberately deferred, not silently skipped — see CHANGELOG.md and roadmap.md §18 for full detail including two real bugs found by this work's own tests before shipping
-- **v2.9.1** (2026-07-10): Two real stubs found and fixed (`MasterDebugger.classify_risk()`, `RustDebugger.phase_2_formal()`) by body-diffing every shared file against the real sibling v2.5.2 archive, not just comparing function names — see CHANGELOG.md for full detail, including what this means for confidence in earlier "verified superset" claims against the other six archives
-- **v2.9.0** (2026-07-10): New `EquivalenceVerifier` (`src/pyprover/equivalence_verifier.py`) — real code-to-code equivalence checking and Z3-backed simplification, built in direct response to v2.8.0's own documentation clarifying that `ContractSimplifier` doesn't do this — see CHANGELOG.md for full detail
-  - `verify_function_equivalence()`: symbolic execution + Z3 proof that two functions compute the same result for all inputs (straight-line/branching arithmetic, bounded loops)
-  - `simplify_function()`: real algebraic simplification via Z3's own term-rewriter, not a guess
-  - `propose_redundant_branch_removal()`: one hand-written rewrite pattern, always independently re-verified before being returned
-  - Reachable via `PyProverBridge.verify_equivalence()` / `.simplify_function_code()`
-  - 32 new tests; two real bugs found and fixed during development (an over-conservative control-flow rejection of the common early-return pattern, and a missing exception-translation path)
-- **v2.8.0** (2026-07-10): Replaced `pyprover/contract_verifier.py`'s non-functional stub with a real, working Z3-based implementation from the actual sibling v2.5.2 archive Max uploaded — see CHANGELOG.md for full detail
-  - Real precondition satisfiability, postcondition validity (implication-checked, not just satisfiability), invariant satisfiability
-  - Existing `ContractVerifier` tests were passing against the stub via vacuous assertions the whole session before this - now meaningfully exercised
-  - Confirmed the earlier `conversation_search`-based reconciliation (v2.7.0) was accurate against the real archive
-- **v2.7.0** (2026-07-10): Branch reconciliation with sibling v2.5.2 (chat `3abe64d4-9daa-44e5-acc8-5e4e6cda9f6b`) + same-day follow-up — see CHANGELOG.md for full detail
-  - `master_debugger/__init__.py` now exports both `MasterDebugger` (v6) and `MasterDebuggerV5`
-  - `pyprover_bridge._map_language_type` accepts `LanguageType` enum directly, not just strings
-  - Removed `hypothesis` phantom dependency from `requirements.txt`
-  - Fixed bare-identifier Z3 Bool/Int crash in `pyprover/contract_simplifier.py` (same bug class the sibling branch found in `contract_verifier.py`, present here in a different module due to architectural divergence)
-  - Fixed `MasterDebuggerV5`'s `input()`-hangs-forever bug (stdin mocking)
-  - Scoped and decided against a suite-wide `tree-sitter` integration (reasoning documented, not just deferred)
-  - Closed the `SemgrepAnalyzer`/`LiefBinaryAnalyzer` test-coverage gap
-  - Six-archive feature-loss audit: recovered real `pyprover_v11_2` adapter source (replacing an untested reconstruction), found+fixed a Z3 soundness bug in it, verified both older full-suite snapshots are strict subsets of current
-  - Added regression tests for every fix above
-- **v2.4.0** (2026-07-04): Phases 5 (DWARF), 6 (CBMC/KLEE), 7 (C-Debug + strace) — 92 new tests, 265 total
-  - Phase 5: DWARFAnalyzer via pyelftools (stack-pointer escape, void\* heap, double-free heuristics)
-  - Phase 6: SymbolicExecutor wrapping CBMC + KLEE with deduplication and graceful degradation
-  - Phase 7: CDebugger (c_debug module) with SyscallTracer — strace fd/syscall analysis for plain C
-  - CppDebugger now runs all 6 layers (Phases 4-6) in sequence; plain-C routes through CDebugger
-  - MasterDebugger routes `language="c"` to CDebugger; `language="cpp"/"c++"` stays with CppDebugger
-- **v2.3.0** (2026-07-04): Bug fixes (self-analysis pass) + PyProver expansion + test-generator improvements
-  - Fixed `ContractVerifier.parse_contract()` — was returning garbled results on all real input; now correctly matches `# Pre:`/`# Post:`/`# Inv:` comment annotations
-  - Fixed Phase 1 (python-debug) always silently failing inside `MasterDebugger.debug_comprehensive()` — relative import error swallowed; now uses try/except fallback for both package modes
-  - Fixed `DiagnosisResult` called as dict in Phase 3 design review (`diagnosis.get(...)` → field access)
-  - Fixed test generator emitting wrong function name in generated code (`classify` → actual `func_name` parameter propagated through `format_tests` → `_format_pytest` / `_format_jest`)
-  - Added `_infer_expected_outputs()` to test generator: executes deterministic functions with generated inputs and captures real expected values instead of `# TODO: Verify expected output`
-  - Added code-pattern red team detection: `eval()`/`exec()` injection tests and `open()` path traversal tests fire based on source analysis, not docstring keywords
-  - Fixed 9 f-strings without interpolation in `python_debug/debug_report.py` human-readable output; fixed `open()` without encoding
-  - Added **LoopVerifier** (`src/pyprover/loop_verifier.py`): Z3 INIT + PRESERVATION for `# Invariant: expr` annotations in while-loops
-  - Added **ContractSimplifier** (`src/pyprover/contract_simplifier.py`): iterative Z3 implication-check clause removal
-  - Wired `FFIVerifier` into `PyProverBridge.verify_ffi()` (heuristic entry point from raw source)
-  - Added `PyProverBridge.verify_loop_invariants()` convenience method
-  - Wired test-generator into `MasterDebugger.debug_comprehensive()` — generates regression tests automatically when issues are found
-  - Updated SKILL.md: corrected `MasterDebuggerV5` → `MasterDebugger`; corrected `UnifiedDebugReport` fields; rewrote Known Limitations to reflect actual state
-  - Test suite: 111 → 124 passing (13 new tests for LoopVerifier and ContractSimplifier)
-- **v2.2.0** (2026-06-30): C/C++-Debug (Phase 4) + suite-wide bugfix pass
-  - Added Cpp-Debug: clang compiler diagnostics + Clang Static Analyzer + design review for C/C++
-  - Routed C/C++ code through master-debugger-v6 automatically
-  - Fixed missing `src/__init__.py` and 4 missing test-package `__init__.py` files that broke relative imports
-  - Fixed `master_debugger/__init__.py`, `orchestrator_v5.py` risk-classifier false positives, missing `RiskLevel.LOW`
-  - Implemented previously-stubbed `PyProverBridge._convert_to_unified_report` / `_map_language_type`, extended `LanguageType` to all 12 PyProver languages
-  - Fixed wrong/nonexistent enum members and dataclass kwargs across `rust_debug` (`ComponentType.RUNTIME`→`RUST_DEBUG`, `ComponentType.STATIC`→`RUST_DEBUG`, `BugPattern(message=...)`→`description=...`, missing `UnifiedDebugReport` required args, `.line`→`.location`)
-  - Wired master-debugger-v6's Python path to the real Phase0/1/3 analyzers instead of stub phase-name appending
-  - Fixed stale `verification_debugging_suite` import in javascript_debug tests (project was renamed)
-  - Full suite: 144/144 tests passing (was 105/125 before this pass)
-- **v2.1.0** (2026-06-28): Rust-Debug (Phases 2-3)
-  - Added PyProver Integration Bridge (Phase 1)
-  - Added Rust borrow checker parser + clippy linter (Phases 2-3)
-  - Master-debugger-v6 routes Rust code to RustDebugger automatically
-- **v1.2.0** (2026-06-28): Cross-language debugging support
-  - Merged JavaScript Debug v1.0 into suite
-  - Master-debugger-v5 now supports both Python and JavaScript code
-  - Added Promise/async tracking for JavaScript debugging
-  - Added aliasing detection for JavaScript objects
-  - Enhanced bug pattern detection for 10 JavaScript-specific patterns
-  - Integrated JavaScript execution tracer with same API as Python variant
-- **v1.0.1** (2026-06-24): Maintenance release - fixed circular imports, added 80+ test cases, pytest.ini
-- **v1.0.0** (2026-06-24): Production release - all 4 phases complete, all 7 components stable
-- **v0.9.0 / v0.5.0** (2026-06-22/23): Beta/Alpha releases
+Full per-release detail for every entry below (and the "NEW in vX.Y" bullets above) lives in CHANGELOG.md, packaged alongside this file — read it before assuming a component is a stub or that a past finding wasn't fixed.
 
-For detailed changes, see CHANGELOG.md
+- **v2.9.6** (2026-07-11): Fixed 2 tests broken by v2.9.5's borrow-checker `category` filter; closed a `pytest.ini` `testpaths` gap that had excluded the top-level `tests/` directory from every past suite-wide pass/fail count
+- **v2.9.5** (2026-07-11): STUBS.md inventory — all documented STUB items fixed (rust_debug Phase 0, test_generator metamorphic/coverage/fuzzing stubs, troubleshooting/diagnostics.py's three dead classes, javascript_debug's execute_with_debug/analyze_patterns)
+- **v2.9.4** (2026-07-10): Two severe synthesis bugs fixed in the bug-detection tool's own aggregation logic (unhandled-exception dispatch gap; `report.issues_found` never receiving static/runtime findings) — added explicit `⚠️ CONFLICT` state
+- **v2.9.3** (2026-07-10): Real `len()`/`abs()`/`min()`/`max()` and string-predicate support across all three AST-to-Z3 translators — the highest-impact silent gap found in the verifier so far
+- **v2.9.2** (2026-07-10): Real `forall`/`exists` quantifier support and Z3-backed ghost state tracking
+- **v2.9.1** (2026-07-10): Two real stubs found and fixed via body-diffing (not just name-presence comparison) against the sibling v2.5.2 archive
+- **v2.9.0** (2026-07-10): New `EquivalenceVerifier` — real code-to-code equivalence checking and Z3-backed simplification
+- **v2.8.0** (2026-07-10): Replaced `ContractVerifier`'s non-functional stub with a real Z3-based implementation from the sibling archive
+- **v2.7.0** (2026-07-10): Six-archive branch reconciliation with sibling v2.5.2, plus same-day bugfixes (RiskLevel unification, `contract_simplifier.py` Z3 crash, `MasterDebuggerV5` input()-hang)
+- **v2.6.0-2.6.1** (2026-07-09): valgrind/cppcheck/semgrep/lief integrations; fixed bandit never matching real output and a CBMC 6.x flag-incompatibility silent-failure
+- **v2.5.0** (2026-07-09): Assembly Phases 8-10 (Capstone disassembly/CFG, taint dataflow, angr symbolic execution)
+- **v2.4.0** (2026-07-04): DWARF (Phase 5), CBMC/KLEE (Phase 6), C-Debug + strace (Phase 7)
+- **v2.3.0** (2026-07-04): LoopVerifier, ContractSimplifier, and a self-analysis bugfix pass across the suite
+- **v2.2.0** (2026-06-30): C/C++-Debug (Phase 4) + suite-wide bugfix pass
+- **v2.1.0** (2026-06-28): Rust-Debug (Phases 2-3)
+- **v1.2.0** (2026-06-28): JavaScript-Debug merged in; cross-language support
+- **v1.0.0-v1.0.1** (2026-06-24): Production release, all 4 phases complete
+- **v0.5.0-v0.9.0** (2026-06-22/23): Beta/Alpha releases
+
+For full detail on any entry above, see CHANGELOG.md.
 
