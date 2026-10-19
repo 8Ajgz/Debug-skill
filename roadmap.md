@@ -56,6 +56,22 @@
 5. Counterexample-driven test generation. The roadmap says it exists in `test_generator`, but the code does not have it.
 6. Developer tooling (Makefile, ruff, black, pytest-benchmark) and the eight v12.2 example scripts.
 7. Re-run the standardize-skill security audit (roadmap 2.6). Not done.
+8. Silent `except` handlers in `assembly_debug` (`symbolic.py`), `cpp_debug` (`lief_analyzer.py`, `dwarf_analyzer.py`) and `code_orchestrator`. Only `master_debugger` was traced. Check each for a path to a verdict before changing it. `code_orchestrator` is not on the master debugger verdict path (checked 2026-10-19). `LiefBinaryAnalyzer` is exported but not called by the verdict pipeline.
+9. Known gap in the formal check: `_phase_2_formal` derives `verified` from `risk_level == LOW and confidence >= 0.9` on the bridge's result. That mapping was not re-checked against PyProver's own verdict.
+
+**Handoff (for the next instance, written 2026-10-19):**
+
+- *How this session worked:* each fix followed one loop. Find a silent failure on the verdict path, reproduce it with a fake tool or stub (on PATH, or monkeypatched), fix it, add a test that fails on the old code (`git stash push -- <file>` then rerun), run the full suite, update this section and `CHANGELOG.md`, commit on a branch, fast-forward `main`, and `git push origin main`. Verify with `git rev-parse --short HEAD` and `origin/main` after `git fetch`.
+- *Environment:* the repo is cloned at `/home/user/debug-skill`. Packages needed for the suite: `pytest`, `hypothesis`, `z3-solver` (`pip install`). Without `z3-solver`, three `src/pyprover/tests` modules fail at collection. Skip count depends on which optional tools are installed (`bandit`, `semgrep`, `lief` were absent in the last sandbox).
+- *Test patterns in use:* `tests/test_master_debugger_static_tools.py` holds the regression tests. Fake external tools are written as shell scripts into a `tmp_path` that is prepended to `PATH` (`_fake_bandit`, `_fake_slow_mypy`). Stubs replace `MasterDebugger.pyprover_bridge`. Monkeypatched module attributes are read at call time. Imports use `from src.<pkg> ...`, not the relative form.
+- *Decisions made in this session (do not reopen without new evidence):*
+  - A tool that is not installed is a skip. A tool that ran and failed is a `*_tool_error` issue. A traced program's own exceptions are not tool errors.
+  - A phase with a failed tool does not pass.
+  - Fixes go through the verdict path (`orchestrator.py` and `orchestrator_v5.py`), not only the phase classes.
+  - Commit trailer: the user asked for `Co-Authored-By: Claude Haiku 5.5 overseen by Maxwell Morrongiello`, which overrides the "no model identifier" rule for this repo. Earlier commits used a generic `Claude` trailer.
+  - Commits are not pushed unless the user asks, though this repo's convention is a fast-forward push to `main`. The user asked for merges to `main` in later rounds, and those were done.
+- *Open from this session:* item 8 above. Also `_phase_2_formal` does not record its reason on the report when it is unavailable, only when it crashes.
+- *Budget note:* the user was tracking a usage limit (7% then 6%). Each fix took roughly 6 to 10 tool calls. Keep the roadmap edits to one read and one edit per line.
 
 **Known gaps, not yet triaged:**
 - The old code had a `TemplatesMatcher` that chose the invariant template from the code. The repo has no equivalent, so templates have to be picked by hand.
