@@ -30,8 +30,10 @@ class Phase0StaticAnalysis:
                 )
                 if output.returncode != 0:
                     result.mypy_errors = output.stdout.split('\n')
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                pass
+            except subprocess.TimeoutExpired:
+                result.tool_errors.append("mypy: timed out after 5s")
+            except FileNotFoundError:
+                pass  # not installed: a skip, not a failure
             
             # Run pylint
             try:
@@ -41,8 +43,10 @@ class Phase0StaticAnalysis:
                 )
                 if output.returncode != 0:
                     result.pylint_issues = output.stdout.split('\n')[:10]
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                pass
+            except subprocess.TimeoutExpired:
+                result.tool_errors.append("pylint: timed out after 5s")
+            except FileNotFoundError:
+                pass  # not installed: a skip, not a failure
             
             # Run bandit
             #

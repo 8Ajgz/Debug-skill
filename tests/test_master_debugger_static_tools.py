@@ -83,3 +83,31 @@ def test_broken_static_tool_keeps_verdict_out_of_verified(fake_bandit_dir):
 
     assert any(i.type == "static_tool_error" for i in report.issues_found)
     assert report.overall_health != "✅ VERIFIED"
+
+
+def _fake_slow_mypy(bin_dir):
+    path = bin_dir / "mypy"
+    path.write_text("#!/bin/sh\nsleep 7\nexit 1\n")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def test_mypy_timeout_is_recorded_not_read_as_clean(fake_bandit_dir):
+    _fake_slow_mypy(fake_bandit_dir)
+
+    result = Phase0StaticAnalysis.run("def f(x: int) -> int:\n    return x\n")
+
+    assert result.mypy_errors == []
+    assert "mypy: timed out after 5s" in result.tool_errors
+
+
+def test_mypy_timeout_reaches_the_verdict(fake_bandit_dir):
+    _fake_slow_mypy(fake_bandit_dir)
+
+    report = asyncio.run(
+        MasterDebugger(use_pyprover=False).debug_comprehensive(
+            "def f(x: int) -> int:\n    return x\n", "python", phases=["static"]
+        )
+    )
+
+    assert any(i.type == "static_tool_error" and "mypy" in i.description for i in report.issues_found)
+    assert report.overall_health != "✅ VERIFIED"
