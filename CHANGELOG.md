@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- `src/pyprover/verification_cache.py`: SHA256-keyed, bounded LRU cache for `ContractVerifier` results (roadmap 2.1)
+- `src/pyprover/parallel_verifier.py`: `batch_verify()` runs contracts in worker processes; Z3 is not thread-safe on its default context
+- `src/pyprover/smtlib_export.py`: `export_smtlib()` emits SMT-LIB v2 scripts from Z3's `to_smt2()`, not a stub
+- `src/pyprover/property_tester.py`: `property_test()` checks Python contracts with Hypothesis (optional dependency); clauses are evaluated without `eval()`
+- `src/pyprover/invariant_templates.py`: BinarySearchBounds, MinMaxLoop, SumAccumulator, FilterCount, Scan, StateMachine, ported from v8.2; checked against reference loops in tests
+- `docs/EVOLUTION.md`: release history and feature-loss audit of the archive
+
+### Fixed
+
+- `rust_debug/borrow_checker.py` linked a binary named after the temp file into the working directory on every check. Now uses `--emit=metadata --out-dir <tempdir>`
+- `pytest.ini` sets `pythonpath = src .`, so plain `pytest` collects `common.*` imports
+
 ## [2.9.6] - 2026-07-11 (regression fix: v2.9.5's borrow-checker category filter broke 2 existing tests; testpaths gap that hid them also fixed)
 
 ### Fixed
