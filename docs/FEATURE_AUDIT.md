@@ -35,9 +35,10 @@ Every feature named in the archive's roadmap (`roadmap.md`), component SKILL.md 
 | Five-layer stack, layer 1 static analysis | Incorporated | `master_debugger` phase 0: mypy, pylint, bandit, semgrep |
 | Five-layer stack, layer 2 runtime sanitizers (ASan, UBSan) | Not incorporated | Valgrind is in `c_debug`; ASan and UBSan are not |
 | Five-layer stack, layer 3 bounded model checking | Incorporated | CBMC and KLEE wrappers in `cpp_debug/symbolic_executor.py` |
-| Five-layer stack, layer 4 property testing | Partial | Python only (`property_tester.py`). JavaScript and Rust property testing are missing |
+| Five-layer stack, layer 4 property testing | Incorporated | Python (`property_tester.py`), JavaScript (node) and Rust (rustc) (`property_tester_lang.py`) |
 | Five-layer stack, layer 5 formal verification (Z3) | Incorporated | `contract_verifier.py` and the modules around it |
-| Hypothesis property testing | Incorporated | `pyprover/property_tester.py`, optional dependency |
+| Hypothesis property testing | Incorporated | `pyprover/property_tester.py`, optional dependency. Boundary values always run; runs are derandomized |
+| Decorator contract syntax `@requires`, `@ensures`, `@loop_invariant` (v11, v13) | Incorporated | `contract_verifier._decorator_clauses`; accepts string literals split across lines. Other decorators from the old code (`@contract`, `@ghost_variable`, `@pure_function`, `@applies_contract`, `@auto_validator`, `@with_runtime_safety`) are not incorporated |
 | SymPy simplification, beartype, Pydantic | Not incorporated | Library choices from v6/v7, not features. Not reviewed for value |
 | Coq and Lean 4 export | Never built | The v7.0 code was a stub with no translation |
 | SMT-LIB export | Incorporated | `pyprover/smtlib_export.py`, re-solved in tests |
@@ -46,7 +47,7 @@ Every feature named in the archive's roadmap (`roadmap.md`), component SKILL.md 
 | Float precision (FloatWorkAround) | Superseded | Floats are Z3 Real (`contract_verifier.seed_real_env`) |
 | Strings, `len`, `abs`, `min`, `max` | Incorporated | `pyprover/z3_builtins.py` |
 | Ghost state, owner tracking | Incorporated | `pyprover/ghost_state.py` |
-| Loop verifier with quantifiers (roadmap 18.2) | Not incorporated | Deferred in the roadmap; still open |
+| Loop verifier with quantifiers (roadmap 18.2) | Incorporated | `loop_verifier.py` translates `all()`/`any()` over `range()` to ForAll/Exists, checked in INIT and PRESERVATION. Still one step, no loop body, no arrays |
 | Standardize-skill security audit (roadmap 2.6) | Not verified | Not re-run in this audit |
 
 ## Python debug (roadmap section 3)
@@ -71,7 +72,8 @@ Every feature named in the archive's roadmap (`roadmap.md`), component SKILL.md 
 | Red-team and fuzzing payloads | Incorporated | `generate_red_team_tests`, `generate_fuzzing_payloads` |
 | Real `run_tests` and `measure_coverage` | Incorporated | Fixed in 2.9.5 (formerly hardcoded) |
 | Counterexample-driven test generation | Not incorporated | Roadmap says it was built in test_generator; no such code exists |
-| Master debugger calls test generator (bugs found, then tests generated) | Partial | `master_debugger/orchestrator.py` phase 5 generates regression tests. The "verify the fix" step is missing |
+| Master debugger calls test generator (bugs found, then tests generated) | Incorporated | `master_debugger/orchestrator.py` phase 5 generates regression tests |
+| Verify the fix: bug reproduced on the original, fix passes on the new code | Incorporated | `master_debugger/fix_verifier.py` `verify_fix()`, for Python, JavaScript and Rust. It is a function the caller invokes, not an automatic step in `debug()`. Requires postconditions |
 
 ## Master debugger (roadmap section 5)
 
@@ -116,12 +118,11 @@ Every feature named in the archive's roadmap (`roadmap.md`), component SKILL.md 
 
 ## Open items, in priority order
 
-1. Decorator contract syntax (`@requires`, `@ensures`, `@loop_invariant`), from v11 and v13. The repo uses comments only. This needs a decision on whether the decorator form should be supported.
-2. Loop verifier with quantifiers (roadmap 18.2).
-3. Master debugger: the "verify the fix" step after regression tests are generated.
-4. Per-language contract parsing for Go, Java, C#, TypeScript and WebAssembly.
-5. Counterexample-driven test generation, which the roadmap says exists and the code does not have.
-6. Runtime sanitizer layer (ASan, UBSan).
-7. Property testing for JavaScript and Rust.
-8. Developer tooling and the v12.2 example scripts.
-9. Standardize-skill security audit re-run.
+1. Remaining decorators from the old code: `@contract`, `@ghost_variable`, `@pure_function`, `@applies_contract`, `@auto_validator`, `@with_runtime_safety`. Only `@requires`, `@ensures` and `@loop_invariant` are supported.
+2. Per-language contract parsing for Go, Java, C#, TypeScript and WebAssembly. Their contracts are text only.
+3. Property testing for Go, Java, C# and the other adapters from v10. Only Python, JavaScript and Rust are done.
+4. Loop verifier: model the loop body and arrays, so PRESERVATION is not limited to one `i += 1` step.
+5. Runtime sanitizer layer (ASan, UBSan).
+6. Counterexample-driven test generation, which the roadmap says exists and the code does not have.
+7. Developer tooling and the v12.2 example scripts.
+8. Standardize-skill security audit re-run.

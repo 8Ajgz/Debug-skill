@@ -6,7 +6,7 @@ contract on generated inputs, and the formal verifier must not reject it.
 Code without postconditions cannot be checked this way and is reported as
 not verified.
 
-Running the property check executes the function under test, so only use this
+Supports Python, JavaScript (node) and Rust (rustc). Running the property check executes the function under test, so only use this
 on code you trust (see pyprover/property_tester.py).
 """
 from dataclasses import dataclass
@@ -14,6 +14,13 @@ from typing import Any, Dict, Optional
 
 from ..pyprover.contract_verifier import Z3_AVAILABLE, ContractVerifier
 from ..pyprover.property_tester import property_test
+from ..pyprover.property_tester_lang import property_test_js, property_test_rust
+
+_RUNNERS = {
+    "python": property_test,
+    "javascript": property_test_js,
+    "rust": property_test_rust,
+}
 
 
 @dataclass
@@ -27,8 +34,12 @@ class FixVerification:
     reason: str
 
 
-def verify_fix(original_code: str, fixed_code: str, max_examples: int = 200) -> FixVerification:
-    before = property_test(original_code, max_examples=max_examples)
+def verify_fix(original_code: str, fixed_code: str, language: str = "python",
+               max_examples: int = 200) -> FixVerification:
+    if language not in _RUNNERS:
+        raise ValueError(f"unsupported language {language!r}; expected one of {sorted(_RUNNERS)}")
+    run = _RUNNERS[language]
+    before = run(original_code, max_examples=max_examples)
     if before["status"] == "skipped":
         return FixVerification(
             fix_verified=False, bug_reproduced=False, counterexample=None,
@@ -42,7 +53,7 @@ def verify_fix(original_code: str, fixed_code: str, max_examples: int = 200) -> 
             reason="the original code passed its contract; no bug reproduced, so there is nothing to fix",
         )
 
-    after = property_test(fixed_code, max_examples=max_examples)
+    after = run(fixed_code, max_examples=max_examples)
     formal = ContractVerifier.verify_contract(fixed_code)["verified"] if Z3_AVAILABLE else None
     fixed_ok = after["status"] == "passed" and formal is not False
 

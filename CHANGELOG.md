@@ -11,6 +11,10 @@
 - `src/pyprover/invariant_templates.py`: BinarySearchBounds, MinMaxLoop, SumAccumulator, FilterCount, Scan, StateMachine, ported from v8.2; checked against reference loops in tests
 - Conditional postconditions: `# Post: if <cond>: <clause>` is checked as Implies(cond, clause) by `ContractVerifier`, `ContractSimplifier` and `property_test`. The `else` form is skipped, not guessed
 - Float precision: float literals are exact Z3 reals, variables in float clauses or annotated `float` are Real, and `/` is real division. Before this, float contracts were checked over the integers, which gave wrong verdicts in both directions
+- Decorator contracts `@requires`, `@ensures` and `@loop_invariant`, including string literals split across lines
+- Loop verifier: `all()`/`any()` over `range()` become ForAll/Exists in INIT and PRESERVATION
+- `master_debugger.verify_fix()`: the original must fail its contract on generated inputs and the fix must pass (Python, JavaScript, Rust)
+- Property testing for JavaScript (node) and Rust (rustc), `pyprover/property_tester_lang.py`
 - `docs/FEATURE_AUDIT.md`: status of every old feature in the archive, with where it lives and what remains open
 - `docs/EVOLUTION.md`: release history and feature-loss audit of the archive
 
@@ -19,6 +23,7 @@
 - `rust_debug/borrow_checker.py` linked a binary named after the temp file into the working directory on every check. Now uses `--emit=metadata --out-dir <tempdir>`
 - `ContractSimplifier` now uses the verifier's expression translator instead of its own copy
 - `python_debug`: `get_variable_mutations()` crashed on timeline events with no snapshot, and dropped mutations for variables first assigned on the last line
+- Property tester: boundary values always run and runs are derandomized. Random sampling had missed a bug at x == 1 in some runs
 - `pytest.ini` sets `pythonpath = src .`, so plain `pytest` collects `common.*` imports
 
 ## [2.9.6] - 2026-07-11 (regression fix: v2.9.5's borrow-checker category filter broke 2 existing tests; testpaths gap that hid them also fixed)

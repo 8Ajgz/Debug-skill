@@ -37,3 +37,17 @@ def test_untestable_original_is_not_verified():
     result = verify_fix("def f(x):\n    return x\n", FIXED)
     assert result.fix_verified is False
     assert "cannot test" in result.reason
+
+
+@pytest.mark.skipif(__import__("shutil").which("node") is None, reason="node not installed")
+def test_javascript_fix_verified():
+    buggy = "// Pre: x > 0\n// Post: result > 0\nfunction f(x) {\n  return x - 1;\n}\n"
+    fixed = "// Pre: x > 0\n// Post: result > 0\nfunction f(x) {\n  return x;\n}\n"
+    result = verify_fix(buggy, fixed, language="javascript")
+    assert result.fix_verified is True
+    assert result.counterexample == {"x": 1}
+
+
+def test_unknown_language_is_rejected():
+    with pytest.raises(ValueError):
+        verify_fix(BUGGY, FIXED, language="cobol")
