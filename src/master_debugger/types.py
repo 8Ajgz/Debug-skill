@@ -23,6 +23,9 @@ class StaticAnalysisResult:
     pylint_issues: List[str] = field(default_factory=list)
     bandit_warnings: List[str] = field(default_factory=list)
     semgrep_findings: List[str] = field(default_factory=list)
+    # A tool that ran and failed (timeout, crash, unparseable output). A tool
+    # that is not installed is a skip and is not recorded here.
+    tool_errors: List[str] = field(default_factory=list)
     passed: bool = False
     
 @dataclass

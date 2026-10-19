@@ -211,6 +211,25 @@ class MasterDebugger:
                             phase=DebugPhase.STATIC, type="pylint_issue",
                             description=issue, severity="low", confidence=0.7,
                         ))
+                    # bandit and semgrep findings were computed into the result
+                    # but never copied here, so they could not change the verdict.
+                    for warning in static_result.bandit_warnings:
+                        report.issues_found.append(Issue(
+                            phase=DebugPhase.STATIC, type="bandit_warning",
+                            description=warning, severity="medium", confidence=0.7,
+                        ))
+                    for finding in static_result.semgrep_findings:
+                        report.issues_found.append(Issue(
+                            phase=DebugPhase.STATIC, type="semgrep_finding",
+                            description=finding, severity="medium", confidence=0.7,
+                        ))
+                    # A static tool that ran and failed means the static phase did
+                    # not fully run, so the verdict must not read as clean.
+                    for tool_error in static_result.tool_errors:
+                        report.issues_found.append(Issue(
+                            phase=DebugPhase.STATIC, type="static_tool_error",
+                            description=tool_error, severity="low", confidence=0.9,
+                        ))
                     report.phases_completed.append(DebugPhase.STATIC)
                     token_cost += 50
                 if "runtime" in phases:

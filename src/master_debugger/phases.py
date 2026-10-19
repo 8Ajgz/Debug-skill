@@ -73,10 +73,16 @@ class Phase0StaticAnalysis:
                         f"(line {r['line_number']})"
                         for r in bandit_data.get('results', [])
                     ][:10]
-                except (json.JSONDecodeError, KeyError):
-                    pass
-            except (subprocess.TimeoutExpired, FileNotFoundError):
-                pass
+                except (json.JSONDecodeError, KeyError) as e:
+                    # bandit exits 1 when it finds issues but still writes JSON,
+                    # so unparseable stdout means the tool itself failed.
+                    result.tool_errors.append(
+                        f"bandit: unparseable output (exit {output.returncode}): {type(e).__name__}"
+                    )
+            except subprocess.TimeoutExpired:
+                result.tool_errors.append("bandit: timed out after 5s")
+            except FileNotFoundError:
+                pass  # not installed: a skip, not a failure
 
             # Run semgrep (v2.6.0) - pattern-based second opinion alongside
             # bandit, using a locally-bundled rule subset since semgrep.dev's
@@ -89,9 +95,9 @@ class Phase0StaticAnalysis:
                     f"[{p.pattern_type}] {p.severity.value}: {p.description} ({p.location})"
                     for p in semgrep_patterns
                 ][:10]
-            except Exception:
-                pass
-            
+            except Exception as e:
+                result.tool_errors.append(f"semgrep: {type(e).__name__}: {e}")
+
             result.passed = len(result.mypy_errors) == 0
         finally:
             import os
