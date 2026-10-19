@@ -2,7 +2,7 @@
 
 > **Provenance:** all code in this repository was written by an unspecified version of Claude, unless a commit or file says otherwise.
 >
-> All commits from this account were made by Claude under the oversight of Maxwell Morrongiello.
+> All commits from this account were made by Claude under the oversight of Maxwell Morrongiello unless otherwise specified.
 
 Production-ready unified debugging and verification suite combining 8 complementary tools for Python and JavaScript: python-debug, javascript-debug, pyprover, test-generator, code-orchestrator, troubleshooting, master-debugger-v5, and common utilities with unified interoperability layer.
 
