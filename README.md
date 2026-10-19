@@ -1,5 +1,7 @@
 # Debug Suite v1.2
 
+> **Provenance:** all code in this repository was written by an unspecified version of Claude, unless a commit or file says otherwise.
+
 Production-ready unified debugging and verification suite combining 8 complementary tools for Python and JavaScript: python-debug, javascript-debug, pyprover, test-generator, code-orchestrator, troubleshooting, master-debugger-v5, and common utilities with unified interoperability layer.
 
 ## Quick Start

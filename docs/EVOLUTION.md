@@ -1,5 +1,7 @@
 # Debug Suite: Evolution and Feature-Loss Audit
 
+> **Provenance:** all code in this repository was written by an unspecified version of Claude, unless a commit or file says otherwise.
+
 **Scope:** the 114-entry archive `4ea504df-archive.zip` (debug-suite snapshots, pyprover, python-debug, javascript-debug, py-debug, verification-debugging-suite).
 **Newest release in the archive:** debug-suite v2.9.6 (2026-07-11). The repo `8Ajgz/Debug-skill` on `main` holds v1.2.0 plus two fix commits, so it is several releases behind.
 **Method:** each archive file was unpacked (zip-safe, no code run), its version read from SKILL.md frontmatter and CHANGELOG headings, and its top-level classes and functions compared by name against v2.9.6 with an AST scan. Body-level diffs were done only for the cases called out below.
