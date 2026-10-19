@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Loop verifier: INIT reported a loop invariant as holding at entry whenever it was satisfiable, so `i >= 0` was "verified" with i starting at -1. INIT now checks validity at the entry values read from the source, and is `None` (not checked) when a value is unknown. PRESERVATION with no iteration variable was reported as holding; it is now `None`
 - `rust_debug/borrow_checker.py` linked a binary named after the temp file into the working directory on every check. Now uses `--emit=metadata --out-dir <tempdir>`
 - `ContractSimplifier` now uses the verifier's expression translator instead of its own copy
 - `python_debug`: `get_variable_mutations()` crashed on timeline events with no snapshot, and dropped mutations for variables first assigned on the last line

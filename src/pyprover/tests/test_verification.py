@@ -399,20 +399,28 @@ class TestLoopVerifier:
 
     def test_verify_sat_invariant(self):
         from pyprover.loop_verifier import LoopVerifier
+        code = "i = 0\n# Invariant: i >= 0\nx = 0"
+        report = LoopVerifier().verify_source(code, param_names=["n"])
+        # i starts at 0, so i >= 0 holds at entry
+        if report.z3_available and report.invariants_found > 0:
+            assert report.results[0].init_holds is True
+
+    def test_init_not_checked_without_entry_value(self):
+        from pyprover.loop_verifier import LoopVerifier
+        # Satisfiable is not the same as holding at entry: i is never assigned here.
         code = "# Invariant: i >= 0\nx = 0"
         report = LoopVerifier().verify_source(code, param_names=["n"])
-        # i >= 0 is satisfiable, so INIT should hold
         if report.z3_available and report.invariants_found > 0:
-            assert report.results[0].init_holds
+            assert report.results[0].init_holds is None
+            assert not report.results[0].fully_verified
 
     def test_verify_unsat_invariant(self):
         from pyprover.loop_verifier import LoopVerifier
         # i >= 0 and i < 0 simultaneously — always false
-        code = "# Invariant: i >= 0 and i < 0"
+        code = "i = 0\n# Invariant: i >= 0 and i < 0"
         report = LoopVerifier().verify_source(code, param_names=[])
         if report.z3_available and report.invariants_found > 0:
-            # UNSAT invariant: init_holds should be False
-            assert not report.results[0].init_holds
+            assert report.results[0].init_holds is False
 
     def test_report_summary_no_invariants(self):
         from pyprover.loop_verifier import LoopVerifier

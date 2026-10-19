@@ -12,7 +12,8 @@ pytestmark = [pytest.mark.verification, pytest.mark.skipif(not Z3_AVAILABLE, rea
 
 
 def _check(expr):
-    return verify_loop_invariant(LoopInvariant(expression=expr, loop_var="i"), param_names=["i"])
+    return verify_loop_invariant(LoopInvariant(expression=expr, loop_var="i"), param_names=["i"],
+                                 entry={"i": 0})
 
 
 def test_quantifier_translates_to_forall():
@@ -46,3 +47,17 @@ def test_quantified_invariant_that_breaks_at_the_next_step():
 def test_unsupported_quantifier_domain_skips_instead_of_guessing():
     result = _check("all(k >= 0 for k in items)")
     assert result.skipped is True
+
+
+def test_satisfiable_but_false_at_entry_is_rejected():
+    # The old INIT check accepted this, because i >= 0 is satisfiable. It is false at i = -1.
+    result = verify_loop_invariant(LoopInvariant(expression="i >= 0", loop_var="i"),
+                                   param_names=["i"], entry={"i": -1})
+    assert result.init_holds is False
+
+
+def test_no_iteration_variable_is_not_reported_as_verified():
+    result = verify_loop_invariant(LoopInvariant(expression="total > 5"), param_names=[],
+                                   entry={"total": 9})
+    assert result.preservation_holds is None
+    assert result.fully_verified is False

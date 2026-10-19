@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 
 try:
     import z3
+    from z3.z3util import get_vars
     Z3_AVAILABLE = True
 except ImportError:
     Z3_AVAILABLE = False
@@ -53,8 +54,8 @@ class LoopInvariant:
 class LoopVerificationResult:
     """Result of verifying a single loop invariant expression."""
     invariant: str
-    init_holds: bool = False
-    preservation_holds: bool = False
+    init_holds: Optional[bool] = None       # None: not checked (entry value unknown)
+    preservation_holds: Optional[bool] = None   # None: not checked (no iteration variable)
     post_loop_sound: bool = False     # I ∧ ¬C is consistent (non-vacuous)
     error: Optional[str] = None
     counterexample: Optional[str] = None
@@ -63,7 +64,7 @@ class LoopVerificationResult:
 
     @property
     def fully_verified(self) -> bool:
-        return self.init_holds and self.preservation_holds and not self.skipped
+        return self.init_holds is True and self.preservation_holds is True and not self.skipped
 
 
 @dataclass
@@ -276,11 +277,14 @@ def verify_loop_invariant(
     invariant: LoopInvariant,
     param_names: List[str],
     timeout_ms: int = 5000,
+    entry: Optional[Dict[str, int]] = None,
 ) -> LoopVerificationResult:
     """Verify INIT and PRESERVATION for a single loop invariant.
 
     param_names: names of the function's integer-typed parameters, used to
                  seed the symbolic environment before checking INIT.
+    entry:       known integer values at loop entry. INIT is checked only when
+                 every variable in the invariant has a known value.
 
     The verification strategy:
       INIT: assert ¬I in a fresh solver with standard integer bounds;
@@ -301,36 +305,13 @@ def verify_loop_invariant(
     z3_builtins.seed_string_env([invariant.expression], env)
 
     # ------------------------------------------------------------------
-    # INIT: Is the invariant satisfiable given standard integer bounds?
-    # We can't prove it holds for ALL inputs without knowing the pre-condition,
-    # so we check: the invariant is SAT (non-vacuous) — i.e. it can be true.
+    # INIT: the invariant must hold at loop entry. That needs the entry values,
+    # which verify_source reads from the assignments before the loop. Without
+    # them, INIT is not checked (init_holds stays None). Satisfiability is not
+    # enough: "i >= 0" is satisfiable but false when i starts at -1.
     # ------------------------------------------------------------------
     try:
-        inv_expr = _parse_invariant_expr(invariant.expression, dict(env))
-        s_init = z3.Solver()
-        # Add reasonable bounds for loop variables
-        for name, var in env.items():
-            s_init.add(var >= 0)
-            s_init.add(var <= 10_000)
-        # Extract any new variables the invariant introduced (e.g. 'i', 'total')
-        inv_env = dict(env)
-        inv_expr2 = _parse_invariant_expr(invariant.expression, inv_env)
-        for name, var in inv_env.items():
-            if name not in env:
-                s_init.add(var >= 0)
-                s_init.add(var <= 10_000)
-        s_init.add(inv_expr2)
-        res = _check_sat(s_init, timeout_ms)
-        if res == "sat":
-            result.init_holds = True
-        elif res == "unsat":
-            result.init_holds = False
-            result.error = "Invariant is UNSAT at loop entry (can never be true)"
-            return result
-        else:
-            result.skipped = True
-            result.skip_reason = "Z3 returned unknown on INIT check"
-            return result
+        inv_expr = _parse_invariant_expr(invariant.expression, env)
     except NotImplementedError as e:
         result.skipped = True
         result.skip_reason = f"Unsupported expression: {e}"
@@ -339,6 +320,30 @@ def verify_loop_invariant(
         result.skipped = True
         result.skip_reason = f"Parse/Z3 error: {e}"
         return result
+
+    free_names = {str(v) for v in get_vars(inv_expr)}
+    known = dict(entry or {})
+    if not free_names <= set(known):
+        missing = sorted(free_names - set(known))
+        result.error = (f"INIT not checked: entry value unknown for {', '.join(missing)}"
+                        if missing else "INIT not checked: no entry values")
+    else:
+        s_init = z3.Solver()
+        s_init.set("timeout", timeout_ms)
+        for name, value in known.items():
+            if name in env:
+                s_init.add(env[name] == value)
+        s_init.add(z3.Not(inv_expr))
+        res = _check_sat(s_init, timeout_ms)
+        if res == "unsat":
+            result.init_holds = True
+        elif res == "sat":
+            result.init_holds = False
+            result.error = "Invariant does not hold at loop entry"
+            result.post_loop_sound = False
+            return result
+        else:
+            result.error = "Z3 returned unknown on INIT check"
 
     # ------------------------------------------------------------------
     # PRESERVATION: assume I holds at iteration k; increment iteration
@@ -393,8 +398,8 @@ def verify_loop_invariant(
                 result.preservation_holds = False
                 result.error = "Z3 returned unknown on PRESERVATION check"
         else:
-            # No iteration variable found — skip preservation, mark INIT only
-            result.preservation_holds = True  # Generous: no counter-evidence
+            # No iteration variable found: preservation is not checked (None), not assumed
+            result.preservation_holds = None
             result.error = (
                 "No iteration variable found (expected 'i', 'j', 'k', etc.); "
                 "PRESERVATION not checked."
@@ -406,13 +411,47 @@ def verify_loop_invariant(
         result.preservation_holds = False
         result.error = f"PRESERVATION check error: {e}"
 
-    result.post_loop_sound = result.init_holds
+    result.post_loop_sound = result.init_holds is True
     return result
 
 
 # ---------------------------------------------------------------------------
 # High-level LoopVerifier
 # ---------------------------------------------------------------------------
+
+def _entry_values(source_code: str, before_line: int) -> Dict[str, int]:
+    """Integer values assigned at top level before ``before_line``, as known at loop entry.
+
+    A name counts only if its last top-level assignment before the loop is an integer
+    constant. Any other assignment, or a for-loop target, removes the name.
+    """
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return {}
+    values: Dict[str, int] = {}
+    for stmt in tree.body:
+        if stmt.lineno >= before_line:
+            break
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            value = stmt.value
+            sign = 1
+            if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.USub):
+                sign, value = -1, value.operand
+            if isinstance(value, ast.Constant) and isinstance(value.value, int) and not isinstance(value.value, bool):
+                values[stmt.targets[0].id] = sign * value.value
+                continue
+        targets = []
+        if isinstance(stmt, ast.Assign):
+            targets = [t for t in stmt.targets if isinstance(t, ast.Name)]
+        elif isinstance(stmt, (ast.AugAssign, ast.AnnAssign)) and isinstance(stmt.target, ast.Name):
+            targets = [stmt.target]
+        elif isinstance(stmt, ast.For) and isinstance(stmt.target, ast.Name):
+            targets = [stmt.target]
+        for t in targets:
+            values.pop(t.id, None)
+    return values
+
 
 class LoopVerifier:
     """High-level loop invariant verifier.
@@ -448,7 +487,8 @@ class LoopVerifier:
         pnames = param_names or []
 
         for inv in invariants:
-            r = verify_loop_invariant(inv, pnames, self.timeout_ms)
+            entry = _entry_values(source_code, inv.line_number or 0)
+            r = verify_loop_invariant(inv, pnames, self.timeout_ms, entry=entry)
             report.results.append(r)
 
         return report

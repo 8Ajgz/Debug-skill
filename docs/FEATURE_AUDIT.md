@@ -47,7 +47,7 @@ Every feature named in the archive's roadmap (`roadmap.md`), component SKILL.md 
 | Float precision (FloatWorkAround) | Superseded | Floats are Z3 Real (`contract_verifier.seed_real_env`) |
 | Strings, `len`, `abs`, `min`, `max` | Incorporated | `pyprover/z3_builtins.py` |
 | Ghost state, owner tracking | Incorporated | `pyprover/ghost_state.py` |
-| Loop verifier with quantifiers (roadmap 18.2) | Incorporated | `loop_verifier.py` translates `all()`/`any()` over `range()` to ForAll/Exists, checked in INIT and PRESERVATION. Still one step, no loop body, no arrays |
+| Loop verifier with quantifiers (roadmap 18.2) | Incorporated | `loop_verifier.py` translates `all()`/`any()` over `range()` to ForAll/Exists, checked in INIT and PRESERVATION. INIT checks validity at the entry values in the source and is `None` when unknown. Still one step, no loop body, no arrays |
 | Standardize-skill security audit (roadmap 2.6) | Not verified | Not re-run in this audit |
 
 ## Python debug (roadmap section 3)
