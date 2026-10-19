@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- `master_debugger` phase 5: a test-generator failure was swallowed by `except Exception: pass`, leaving an empty `test_suite` indistinguishable from "no tests needed". The failure is now recorded in `UnifiedDebugReport.test_generation_error` and printed to stderr. The report is still returned
 - Loop verifier: INIT reported a loop invariant as holding at entry whenever it was satisfiable, so `i >= 0` was "verified" with i starting at -1. INIT now checks validity at the entry values read from the source, and is `None` (not checked) when a value is unknown. PRESERVATION with no iteration variable was reported as holding; it is now `None`
 - `rust_debug/borrow_checker.py` linked a binary named after the temp file into the working directory on every check. Now uses `--emit=metadata --out-dir <tempdir>`
 - `ContractSimplifier` now uses the verifier's expression translator instead of its own copy

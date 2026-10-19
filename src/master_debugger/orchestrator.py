@@ -71,6 +71,10 @@ class UnifiedDebugReport:
     risk_level: RiskLevel = RiskLevel.MEDIUM
     confidence_score: float = 0.0
     pyprover_result: Optional[Dict[str, Any]] = None
+    # Set when phase 5 (regression test generation) fails. Phase 5 is
+    # non-fatal, so the report is still returned, but the failure must not
+    # look like "no tests were needed".
+    test_generation_error: Optional[str] = None
 
 
 class MasterDebugger:
@@ -333,8 +337,11 @@ class MasterDebugger:
                 tg_result = generate_tests(code, language="python", max_tests=20)
                 report.test_suite = tg_result.test_code
                 token_cost += 150
-            except Exception:
-                pass  # Non-fatal: report continues without test suite
+            except Exception as e:
+                # Non-fatal: the report continues without a test suite, but
+                # the failure is recorded and reported, not silently dropped.
+                report.test_generation_error = f"{type(e).__name__}: {e}"
+                print(f"[MasterDebugger] Phase 5 test generation failed: {report.test_generation_error}", file=sys.stderr)
 
         return report
     
