@@ -1,7 +1,7 @@
 openapi: 3.0.0
 info:
   title: Verification-Debugging-Suite API
-  version: 1.1.0
+  version: 2.9.6
   description: Unified verification and debugging orchestrator with formal verification, runtime debugging, test generation, and problem diagnosis
   contact:
     name: API Support

@@ -234,4 +234,4 @@ else:
 
 ---
 
-**Generated:** 2026-06-24 | **Version:** 1.1.0
+**Generated:** 2026-06-24 | **Version:** 2.9.6

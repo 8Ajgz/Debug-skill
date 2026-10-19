@@ -1,4 +1,4 @@
-# Debug Suite v1.2
+# Debug Suite v2.9.6
 
 > **Provenance:** all code in this repository was written by an unspecified version of Claude, unless a commit or file says otherwise.
 >
