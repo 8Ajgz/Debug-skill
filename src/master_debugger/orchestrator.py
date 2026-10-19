@@ -267,11 +267,26 @@ class MasterDebugger:
                 if "testing" in phases:
                     design_result = Phase3DesignReview.run(code)
                     if not design_result.passed:
-                        report.issues_found.append(Issue(
-                            phase=DebugPhase.TESTING, type="design_review_failed",
-                            description="Design review flagged this code (see phase_3_design details)",
-                            severity="medium", confidence=0.6,
-                        ))
+                        # Phase3DesignReview stores a crash in diagnosis["error"]
+                        # and passed=False. That is a review that did not run,
+                        # not a design finding, so it gets its own issue type.
+                        error = design_result.diagnosis.get("error")
+                        if error:
+                            design_issue = Issue(
+                                phase=DebugPhase.TESTING, type="design_review_error",
+                                description=f"Design review could not run: {error}",
+                                severity="medium", confidence=0.9,
+                            )
+                        else:
+                            first_step = design_result.remediation[0] if design_result.remediation else ""
+                            design_issue = Issue(
+                                phase=DebugPhase.TESTING, type="design_review_failed",
+                                description=(f"Design review flagged stage "
+                                             f"'{design_result.classification}'"
+                                             + (f": {first_step}" if first_step else "")),
+                                severity="medium", confidence=0.6,
+                            )
+                        report.issues_found.append(design_issue)
                     report.phases_completed.append(DebugPhase.TESTING)
                     token_cost += 200
             except Exception as e:

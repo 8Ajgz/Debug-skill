@@ -10,7 +10,7 @@
 
 ## Current state (read this first)
 
-**Last updated:** 2026-10-19, after the Python-phase error fix on `main`. Everything in the sections below this one is history, and some of it is out of date. Where they disagree, this section and the three docs it names win.
+**Last updated:** 2026-10-19, after the design-review error fix on `main`. Everything in the sections below this one is history, and some of it is out of date. Where they disagree, this section and the three docs it names win.
 
 **Read in this order:**
 1. `docs/FEATURE_AUDIT.md`: status of every old feature (incorporated, partial, superseded, not incorporated, never built, unverifiable), with the file that holds each one, and the open items in priority order.
@@ -22,7 +22,7 @@
 - Repo: `8Ajgz/Debug-skill`, branch `main`. Base is debug-suite 2.9.6, with later changes on top. The history is 13 release commits (1.0.0 to 2.9.6, dated to each release, with 2.0.0 inferred) followed by the work in this file.
 - The original archive zip (114 entries, about 23 MB) is on branch `archive` of the same repo, as an orphan branch with no code. It is not part of the skill. To unpack, use zip-safe extraction into an empty directory, and run any Python that reads it with `python -I`.
 
-**How to verify:** `python -m pytest -q -p no:cacheprovider` from the repo root. Plain `pytest` works (`pytest.ini` sets the import path). Last run: 915 passed, 58 skipped, 1 deselected (2026-10-19, this sandbox). Skips are optional tools (semgrep, bandit, clang, cppcheck, valgrind, CBMC, KLEE, angr) and the Node and Rust tests when `node` or `rustc` is missing. The earlier count of 934 passed, 22 skipped came from a fuller environment. The JS and Rust property tests need `node` and `rustc`. Hypothesis is optional for Python property tests.
+**How to verify:** `python -m pytest -q -p no:cacheprovider` from the repo root. Plain `pytest` works (`pytest.ini` sets the import path). Last run: 916 passed, 58 skipped, 1 deselected (2026-10-19, this sandbox). Skips are optional tools (semgrep, bandit, clang, cppcheck, valgrind, CBMC, KLEE, angr) and the Node and Rust tests when `node` or `rustc` is missing. The earlier count of 934 passed, 22 skipped came from a fuller environment. The JS and Rust property tests need `node` and `rustc`. Hypothesis is optional for Python property tests.
 
 **Done since 2.9.6** (details in CHANGELOG `[Unreleased]`):
 - PyProver: SHA256 cache, parallel batch verification (worker processes, not threads, because Z3 is not thread-safe), SMT-LIB export via `to_smt2()`, Hypothesis property tests (Python), invariant templates (6 of the 8 v8.2 ones), conditional postconditions (`if cond: clause`), float precision (Z3 Real, real division), decorator contracts (`@requires`, `@ensures`, `@loop_invariant`), quantified loop invariants (`all`/`any` over `range` as ForAll/Exists), and property testing for JavaScript (node) and Rust (rustc).
@@ -34,6 +34,7 @@
 - Master debugger concurrency check: when PyProver's `verify_async` raised, `_phase_2_async` returned no findings, so a passing formal check read as ✅ VERIFIED (reproduced with a stub bridge, confidence 0.95). It now returns an `async_tool_error` issue.
 - Master debugger formal check: when PyProver's `verify` raised, `_phase_2_formal` returned `None`, which the caller treats as "not available", so the formal phase was listed as completed and the failure reached the verdict only as INCONCLUSIVE. It now returns a `tool_error` marker, reported as a `formal_tool_error` issue, and the phase is not marked completed. Covered by `tests/test_master_debugger_static_tools.py`.
 - Master debugger Python phases: an exception escaping Phase 0, 1 or 3 was printed and then ignored, so the run could still reach a verdict with none of that phase's findings. It is now an `analysis_error` issue. Covered by `tests/test_master_debugger_static_tools.py`.
+- Master debugger design review: a crashed review was reported as `design_review_failed` with a pointer to a `phase_3_design` field the report does not have, so the error was lost. It is now `design_review_error` with the error text. A real design finding names the classification and first remediation step. Covered by `tests/test_master_debugger_static_tools.py`.
 - Python debug: last-line assignments are recorded (the FIXED build's behaviour, plus the fallback to the last traced line). `get_variable_mutations()` no longer crashes on events without a snapshot.
 - Rust: `rustc` no longer writes a binary into the working directory. Four such binaries that the archive had committed were removed.
 - Pytest: `pythonpath = src .` in `pytest.ini`. Version strings agree at 2.9.6 in SKILL.md, INTEROP.yaml, MANIFEST.txt, openapi.yaml, API.md, README and `src/__init__.py`.

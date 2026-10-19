@@ -250,3 +250,23 @@ def test_crashed_python_phase_is_reported_not_silent(monkeypatch):
     assert any(i.type == "analysis_error" and "static phase crashed" in i.description
                for i in report.issues_found)
     assert report.overall_health != "✅ VERIFIED"
+
+
+def test_crashed_design_review_is_reported_as_not_run(monkeypatch):
+    from src.troubleshooting import Troubleshooter
+
+    def boom(self, code, context=None):
+        raise RuntimeError("troubleshooter crashed")
+
+    monkeypatch.setattr(Troubleshooter, "diagnose", boom)
+
+    report = asyncio.run(
+        MasterDebugger(use_pyprover=False).debug_comprehensive(
+            "def f(x: int) -> int:\n    return x + 1\n", "python", phases=["testing"]
+        )
+    )
+
+    errors = [i for i in report.issues_found if i.type == "design_review_error"]
+    assert len(errors) == 1
+    assert "troubleshooter crashed" in errors[0].description
+    assert not any(i.type == "design_review_failed" for i in report.issues_found)
