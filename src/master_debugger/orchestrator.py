@@ -254,6 +254,14 @@ class MasterDebugger:
                             severity="high" if pattern_str == "unhandled_exception" else "medium",
                             confidence=0.85,
                         ))
+                    # A tracer that raised means the runtime phase did not run,
+                    # so the verdict must not read as clean.
+                    if runtime_result.tool_error:
+                        report.issues_found.append(Issue(
+                            phase=DebugPhase.RUNTIME, type="runtime_tool_error",
+                            description=runtime_result.tool_error,
+                            severity="medium", confidence=0.9,
+                        ))
                     report.phases_completed.append(DebugPhase.RUNTIME)
                     token_cost += 100
                 if "testing" in phases:

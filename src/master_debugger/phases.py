@@ -141,6 +141,7 @@ class Phase1RuntimeDebug:
             result.passed = len(patterns) == 0
         except Exception as e:
             result.exceptions = str(e)
+            result.tool_error = f"python-debug: {type(e).__name__}: {e}"
         
         return result
 

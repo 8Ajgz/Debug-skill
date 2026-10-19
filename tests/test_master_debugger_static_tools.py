@@ -137,3 +137,46 @@ def test_v5_counts_bandit_findings(fake_bandit_dir):
     report = MasterDebuggerV5().debug(CODE)
 
     assert report.total_issues >= len(report.phase_0_static.bandit_warnings) == 1
+
+
+def _broken_tracer(monkeypatch):
+    import src.python_debug as python_debug
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("tracer broke")
+
+    monkeypatch.setattr(python_debug, "execute_with_debug", boom)
+
+
+def test_runtime_tracer_failure_is_an_issue(monkeypatch):
+    _broken_tracer(monkeypatch)
+
+    report = asyncio.run(
+        MasterDebugger(use_pyprover=False).debug_comprehensive(
+            "def f(x: int) -> int:\n    return x + 1\n", "python", phases=["runtime"]
+        )
+    )
+
+    assert any(i.type == "runtime_tool_error" and "tracer broke" in i.description
+               for i in report.issues_found)
+    assert report.overall_health != "✅ VERIFIED"
+
+
+def test_v5_runtime_tracer_failure_counts_and_does_not_pass(monkeypatch):
+    from src.master_debugger.orchestrator_v5 import MasterDebuggerV5
+
+    _broken_tracer(monkeypatch)
+
+    report = MasterDebuggerV5().debug("def f(x: int) -> int:\n    return x + 1\n")
+
+    assert report.phase_1_runtime.tool_error is not None
+    assert report.phase_1_runtime.passed is False
+    assert report.total_issues >= 1
+
+
+def test_traced_program_exception_is_not_a_tool_error():
+    from src.master_debugger.phases import Phase1RuntimeDebug
+
+    result = Phase1RuntimeDebug.run("raise ValueError('the program itself fails')\n")
+
+    assert result.tool_error is None

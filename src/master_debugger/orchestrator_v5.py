@@ -108,6 +108,8 @@ class MasterDebuggerV5:
         
         if report.phase_1_runtime:
             issues += len(report.phase_1_runtime.patterns_found)
+            if report.phase_1_runtime.tool_error:
+                issues += 1
             if report.phase_1_runtime.passed:
                 passed_phases += 1
         

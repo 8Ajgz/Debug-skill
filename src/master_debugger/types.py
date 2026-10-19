@@ -27,11 +27,14 @@ class StaticAnalysisResult:
     # that is not installed is a skip and is not recorded here.
     tool_errors: List[str] = field(default_factory=list)
     passed: bool = False
-    
+
 @dataclass
 class RuntimeDebugResult:
     timeline: List[Dict[str, Any]] = field(default_factory=list)
     variables: Dict[str, List[Any]] = field(default_factory=dict)
+    # Set when the tracer itself raised. The traced program's own exceptions
+    # are not tool errors; they land in `exceptions` and `patterns_found`.
+    tool_error: Optional[str] = None
     exceptions: Optional[str] = None
     patterns_found: List[str] = field(default_factory=list)
     passed: bool = False
