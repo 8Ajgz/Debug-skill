@@ -1,10 +1,66 @@
 # Debug-Suite Roadmap
 
-**Current version:** 2.9.4 per CHANGELOG.md (see §21.4 for a newly-found version-string drift issue: `src/__init__.py`/`INTEROP.yaml`/`MANIFEST.txt` each claim a different, stale version — not yet reconciled)
+**Current version:** 2.9.6 base, with the changes listed in CHANGELOG `[Unreleased]`. Version strings were reconciled in the `Current state` section below.
 **Last updated:** 2026-07-11 (§21 added — real-world Rust test, a genuine `rust_debug` false-positive fixed, `troubleshooting` domain-awareness merge, full stub inventory in `STUBS.md`)
 **See also:** `debug-suite-handoff.md` (regenerated 2026-07-11 alongside this update — read it first for "what to do next"; read this file for the full reasoning behind any of it) and `STUBS.md` (new 2026-07-11, full stub/placeholder inventory referenced from §21.7).
 **This document supersedes:** the original `debug-suite-v2_1` Phase 1-3 roadmap (reproduced in §9 below, updated with current status)
 **Compiled:** June 30, 2026, from a full conversation-history search across every component skill that was merged into this suite (pyprover, python-debug, master-debugger, test-generator, code-orchestrator, troubleshooting, standardize-skill)
+
+---
+
+## Current state (read this first)
+
+**Last updated:** 2026-10-19, after commit `ae5ec5f` on `main`. Everything in the sections below this one is history, and some of it is out of date. Where they disagree, this section and the three docs it names win.
+
+**Read in this order:**
+1. `docs/FEATURE_AUDIT.md`: status of every old feature (incorporated, partial, superseded, not incorporated, never built, unverifiable), with the file that holds each one, and the open items in priority order.
+2. `docs/EVOLUTION.md`: the 13 archive releases that were replayed as history, the component lineages, and the feature-loss audit.
+3. `CHANGELOG.md` `[Unreleased]`: everything changed since 2.9.6.
+4. The rest of this file only for the reasoning behind a specific decision.
+
+**Where the code is:**
+- Repo: `8Ajgz/Debug-skill`, branch `main`. Base is debug-suite 2.9.6, with later changes on top. The history is 13 release commits (1.0.0 to 2.9.6, dated to each release, with 2.0.0 inferred) followed by the work in this file.
+- The original archive zip (114 entries, about 23 MB) is on branch `archive` of the same repo, as an orphan branch with no code. It is not part of the skill. To unpack, use zip-safe extraction into an empty directory, and run any Python that reads it with `python -I`.
+
+**How to verify:** `python -m pytest -q -p no:cacheprovider` from the repo root. Plain `pytest` works (`pytest.ini` sets the import path). Last run: 934 passed, 22 skipped, 1 deselected. Skips are optional tools (semgrep, bandit, clang, cppcheck, valgrind, CBMC, KLEE, angr) and the Node and Rust tests when `node` or `rustc` is missing. The JS and Rust property tests need `node` and `rustc`. Hypothesis is optional for Python property tests.
+
+**Done since 2.9.6** (details in CHANGELOG `[Unreleased]`):
+- PyProver: SHA256 cache, parallel batch verification (worker processes, not threads, because Z3 is not thread-safe), SMT-LIB export via `to_smt2()`, Hypothesis property tests (Python), invariant templates (6 of the 8 v8.2 ones), conditional postconditions (`if cond: clause`), float precision (Z3 Real, real division), decorator contracts (`@requires`, `@ensures`, `@loop_invariant`), quantified loop invariants (`all`/`any` over `range` as ForAll/Exists), and property testing for JavaScript (node) and Rust (rustc).
+- Loop verifier: INIT is checked as validity at the entry values read from the source. It was satisfiability before, which reported `i >= 0` as verified with i starting at -1. Unknown entry or no iteration variable gives `None`, not `True`.
+- Master debugger: `verify_fix()` (bug reproduced on the original, fix passes on the new code), for Python, JS and Rust. It is a function the caller invokes, not an automatic step in `debug()`.
+- Python debug: last-line assignments are recorded (the FIXED build's behaviour, plus the fallback to the last traced line). `get_variable_mutations()` no longer crashes on events without a snapshot.
+- Rust: `rustc` no longer writes a binary into the working directory. Four such binaries that the archive had committed were removed.
+- Pytest: `pythonpath = src .` in `pytest.ini`. Version strings agree at 2.9.6 in SKILL.md, INTEROP.yaml, MANIFEST.txt, openapi.yaml, API.md, README and `src/__init__.py`.
+
+**Decisions and why** (do not reopen without new evidence):
+- Z3 runs in worker processes, not threads (thread-unsafe global context).
+- Floats are Z3 Real. Python `/` is real division. `//` and `%` are skipped over reals, since their semantics differ.
+- Invariant templates are checked by running reference loops, not proved. Z3 does not model subscripts, `len` or `sum`. RECURSION (its `base OR step` form is not an invariant) and WHILE_LOOP (its bound is a guess) were dropped.
+- The v7 SMT-LIB, Coq and Lean exporters were stubs. SMT-LIB was re-done from Z3. Coq and Lean are not ported.
+- tree-sitter: no-go for the suite-wide framing (roadmap 12.2).
+- Contracts are Python-syntax text in every language (comments or decorators). The per-language adapters from v10 and v11 are not wired in.
+- Property testing executes the code under test. Use it only on trusted code.
+
+**Open items, in priority order** (full list with reasons in `docs/FEATURE_AUDIT.md`):
+1. `master_debugger` phase 5 (`orchestrator.py`, around line 330) wraps test generation in `except Exception: pass`. That hides failures silently. It is the next item to fix.
+2. Remaining decorators from the old code: `@contract`, `@ghost_variable`, `@pure_function`, `@applies_contract`, `@auto_validator`, `@with_runtime_safety`.
+3. Per-language contract parsing for Go, Java, C#, TypeScript and WebAssembly, and property tests for those languages.
+4. Loop verifier model: it checks one `i += 1` step. It does not model the loop body or arrays, so PRESERVATION is weaker than the name suggests.
+5. ASan and UBSan runtime checks (layer 2 of the five-layer stack).
+6. Counterexample-driven test generation. The roadmap says it exists in `test_generator`, but the code does not have it.
+7. Developer tooling (Makefile, ruff, black, pytest-benchmark) and the eight v12.2 example scripts.
+8. Re-run the standardize-skill security audit (roadmap 2.6). Not done.
+
+**Known gaps, not yet triaged:**
+- The old code had a `TemplatesMatcher` that chose the invariant template from the code. The repo has no equivalent, so templates have to be picked by hand.
+- The old `VerificationReport` and `Contract` had `to_dict` and `from_dict`. The repo has no serialization for pyprover reports.
+- `pyprover_bridge` JSON now carries `null` for loop `init_holds` and `preservation_holds` when they are unknown. Consumers outside this repo have not been checked.
+
+**Workflow notes:**
+- Never delete tracked files, and never rebuild history, without confirming first. The auto-mode classifier blocked one history rebuild until the user approved it explicitly.
+- `main` only moves forward. Commits are pushed with plain `git push` (fast-forward). No force pushes.
+- Commit trailers: `Co-Authored-By` and `Claude-Session` lines, as the attribution reminder requires. The provenance note in `README.md` says all code was written by an unspecified Claude version under the oversight of Maxwell Morrongiello.
+- Test artifacts: the Hypothesis plugin writes `.hypothesis/` (ignored). Rust tests once wrote binaries into the repo root (fixed, see above).
 
 ---
 
