@@ -293,7 +293,14 @@ class MasterDebugger:
             if pyprover_result:
                 report.pyprover_result = pyprover_result
                 token_cost += 300
-            report.phases_completed.append(DebugPhase.FORMAL)
+            if pyprover_result and pyprover_result.get("tool_error"):
+                report.issues_found.append(Issue(
+                    phase=DebugPhase.FORMAL, type="formal_tool_error",
+                    description=f"PyProver failed: {pyprover_result['tool_error']}",
+                    severity="medium", confidence=0.9,
+                ))
+            else:
+                report.phases_completed.append(DebugPhase.FORMAL)
 
             # Concurrency analysis (race conditions, deadlocks) via the
             # PyProver bridge's verify_async(), source-only so it runs
@@ -402,7 +409,9 @@ class MasterDebugger:
             }
         except Exception as e:
             print(f"[MasterDebugger] PyProver error: {e}", file=sys.stderr)
-            return None
+            # Returned, not None: None means "not available", which the caller
+            # treats as "phase skipped". A crash must be reported as a failure.
+            return {"verified": False, "tool_error": f"{type(e).__name__}: {e}"}
     
     def _phase_2_async(self, code: str, language: str) -> List[Issue]:
         """

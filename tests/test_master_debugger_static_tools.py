@@ -206,3 +206,28 @@ def test_crashed_async_check_does_not_read_as_verified():
     assert any(i.type == "async_tool_error" and "async verifier crashed" in i.description
                for i in report.issues_found)
     assert report.overall_health != "✅ VERIFIED"
+
+
+def test_crashed_formal_check_is_reported_not_completed():
+    from src.master_debugger.orchestrator import DebugPhase
+
+    class CrashingBridge:
+        def is_available(self):
+            return True
+
+        def verify(self, code, language):
+            raise RuntimeError("pyprover crashed")
+
+        def verify_async(self, code, language):
+            return None
+
+    md = MasterDebugger(use_pyprover=False)
+    md.pyprover_bridge = CrashingBridge()
+
+    report = asyncio.run(
+        md.debug_comprehensive("def f(x: int) -> int:\n    return x + 1\n", "python", phases=["formal"])
+    )
+
+    assert any(i.type == "formal_tool_error" and "pyprover crashed" in i.description
+               for i in report.issues_found)
+    assert DebugPhase.FORMAL not in report.phases_completed
