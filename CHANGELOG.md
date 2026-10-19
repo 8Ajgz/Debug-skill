@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.2.0] - 2026-06-28
+
+### Added
+
+- **Cross-language debugging support:**
+  - Merged JavaScript Debug v1.0 into the suite
+  - Master-debugger-v5 supports both Python and JavaScript code
+  - Promise/async tracking for JavaScript debugging
+  - Aliasing detection for JavaScript objects
+  - Ten JavaScript-specific bug patterns
+  - JavaScript execution tracer with the same API as the Python variant
+
+### Fixed
+
+- Test collection: added `__init__.py` to the `tests/` folders of `python_debug`, `pyprover`, `test_generator` and `master_debugger`, so relative imports resolve
+- Removed the root `__init__.py`, which pytest imported as a package and which imported names that are not exported
+- Added `src/__init__.py` so `..component` relative imports inside `master_debugger` resolve
+- Added `pythonpath = .` to `pytest.ini` so `src.` absolute imports work
+- Replaced the stale `verification_debugging_suite` module path in the JavaScript import test and `src/common/interop.py`
+
 ## [1.1.0] - 2026-06-24
 
 ### Added

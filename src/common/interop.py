@@ -293,7 +293,7 @@ class LanguageDetector:
     def get_debugger_for_language(language: LanguageType):
         """Return appropriate debugger class for language."""
         if language == LanguageType.JAVASCRIPT:
-            from verification_debugging_suite.javascript_debug import JavaScriptDebugger
+            from src.javascript_debug import JavaScriptDebugger
             return JavaScriptDebugger
         elif language == LanguageType.PYTHON:
             from verification_debugging_suite.python_debug import execute_with_debug

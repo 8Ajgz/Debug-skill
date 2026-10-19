@@ -1,4 +1,4 @@
-# Verification-Debugging-Suite v1.1.0 – Feature Manifest
+# Debug Suite v1.2.0 – Feature Manifest
 
 **Status:** Production Ready | **Completeness:** 100%
 
@@ -147,4 +147,4 @@
 
 ---
 
-**Manifest Generated:** 2026-06-24 | **Version:** 1.1.0
+**Manifest Generated:** 2026-06-24 | **Version:** 1.2.0

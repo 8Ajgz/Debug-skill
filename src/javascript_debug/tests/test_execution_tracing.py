@@ -12,7 +12,7 @@ from pathlib import Path
 @pytest.mark.integration
 def test_javascript_debugger_import():
     """Test that JavaScript debugger can be imported from suite."""
-    from verification_debugging_suite.javascript_debug import JavaScriptDebugger
+    from src.javascript_debug import JavaScriptDebugger
     assert JavaScriptDebugger is not None
 
 

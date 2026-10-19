@@ -464,7 +464,7 @@ Tests are organized by marker for selective execution:
 
 ```bash
 # From local file
-pip install /path/to/verification-debugging-suite-1.0.0.skill
+pip install /path/to/debug-suite-1.2.0.skill
 
 # Or manual
 python setup.py install
