@@ -415,8 +415,14 @@ class MasterDebugger:
         try:
             result = self.pyprover_bridge.verify_async(code, language)
         except Exception as e:
+            # The concurrency check did not run. Returning no findings here
+            # would let a passing formal check read as VERIFIED.
             print(f"[MasterDebugger] verify_async error: {e}", file=sys.stderr)
-            return []
+            return [Issue(
+                phase=DebugPhase.FORMAL, type="async_tool_error",
+                description=f"verify_async raised {type(e).__name__}: {e}",
+                severity="medium", confidence=0.9,
+            )]
         if result is None or not result.patterns_detected:
             return []
         return [

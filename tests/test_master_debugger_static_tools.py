@@ -180,3 +180,29 @@ def test_traced_program_exception_is_not_a_tool_error():
     result = Phase1RuntimeDebug.run("raise ValueError('the program itself fails')\n")
 
     assert result.tool_error is None
+
+
+def test_crashed_async_check_does_not_read_as_verified():
+    from types import SimpleNamespace
+    from src.common.interop import RiskLevel
+
+    class StubBridge:
+        def is_available(self):
+            return True
+
+        def verify(self, code, language):
+            return SimpleNamespace(risk_level=RiskLevel.LOW, confidence_score=0.95, summary="ok")
+
+        def verify_async(self, code, language):
+            raise RuntimeError("async verifier crashed")
+
+    md = MasterDebugger(use_pyprover=False)
+    md.pyprover_bridge = StubBridge()
+
+    report = asyncio.run(
+        md.debug_comprehensive("def f(x: int) -> int:\n    return x + 1\n", "python", phases=["formal"])
+    )
+
+    assert any(i.type == "async_tool_error" and "async verifier crashed" in i.description
+               for i in report.issues_found)
+    assert report.overall_health != "✅ VERIFIED"
