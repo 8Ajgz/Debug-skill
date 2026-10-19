@@ -15,7 +15,7 @@ Limits, on purpose:
 import ast
 from typing import Any, Dict, List, Optional
 
-from .contract_verifier import ContractVerifier, _RESULT_ALIASES
+from .contract_verifier import ContractVerifier, _RESULT_ALIASES, _conditional_parts
 
 try:
     from hypothesis import HealthCheck, assume, given, settings
@@ -92,6 +92,10 @@ def _eval_node(node: ast.expr, env: Dict[str, Any]) -> Any:
 
 def evaluate_clause(clause: str, env: Dict[str, Any]) -> bool:
     """Evaluate a contract clause against env. Raises UnsupportedClause for disallowed syntax."""
+    parts = _conditional_parts(clause)
+    if parts is not None:  # "if cond: clause" is an implication: true whenever cond is false
+        cond_node, then_node = parts
+        return (not bool(_eval_node(cond_node, env))) or bool(_eval_node(then_node, env))
     try:
         tree = ast.parse(clause, mode="eval")
     except SyntaxError as e:

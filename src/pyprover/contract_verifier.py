@@ -121,6 +121,24 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
     raise NotImplementedError(f"Unsupported AST node: {type(node).__name__}")
 
 
+def _conditional_parts(clause: str) -> Optional[Tuple[ast.expr, ast.expr]]:
+    """Split ``if <cond>: <clause>`` into (cond, clause) AST nodes.
+
+    Only the single-statement form without ``else`` counts. Anything else
+    returns None, so ordinary expressions are parsed as before.
+    """
+    try:
+        module = ast.parse(clause.strip(), mode="exec")
+    except SyntaxError:
+        return None
+    if len(module.body) != 1 or not isinstance(module.body[0], ast.If):
+        return None
+    node = module.body[0]
+    if node.orelse or len(node.body) != 1 or not isinstance(node.body[0], ast.Expr):
+        return None
+    return node.test, node.body[0].value
+
+
 def _clause_to_z3(clause: str, env: Dict[str, Any]) -> Optional[Any]:
     """Parse a clause string to a Z3 expression; return None if unsupported.
 
@@ -141,6 +159,14 @@ def _clause_to_z3(clause: str, env: Dict[str, Any]) -> Optional[Any]:
             # checks (which expect a Z3 BoolRef) can consume it uniformly;
             # the real quantifier reasoning already happened above.
             return z3.BoolVal(result.verified)
+        parts = _conditional_parts(clause)
+        if parts is not None:
+            cond_node, then_node = parts
+            cond = _expr_to_z3(cond_node, env)
+            then = _expr_to_z3(then_node, env)
+            if not (_is_z3_bool(cond) and _is_z3_bool(then)):
+                return None
+            return z3.Implies(cond, then)
         tree = ast.parse(clause, mode="eval")
         return _expr_to_z3(tree.body, env)
     except Exception:

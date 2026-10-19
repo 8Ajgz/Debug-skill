@@ -9,6 +9,7 @@
 - `src/pyprover/smtlib_export.py`: `export_smtlib()` emits SMT-LIB v2 scripts from Z3's `to_smt2()`, not a stub
 - `src/pyprover/property_tester.py`: `property_test()` checks Python contracts with Hypothesis (optional dependency); clauses are evaluated without `eval()`
 - `src/pyprover/invariant_templates.py`: BinarySearchBounds, MinMaxLoop, SumAccumulator, FilterCount, Scan, StateMachine, ported from v8.2; checked against reference loops in tests
+- Conditional postconditions: `# Post: if <cond>: <clause>` is checked as Implies(cond, clause) by `ContractVerifier`, `ContractSimplifier` and `property_test`. The `else` form is skipped, not guessed
 - `docs/EVOLUTION.md`: release history and feature-loss audit of the archive
 
 ### Fixed

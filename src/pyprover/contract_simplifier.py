@@ -39,6 +39,7 @@ except ImportError:
     Z3_AVAILABLE = False
 
 from . import z3_builtins
+from .contract_verifier import _conditional_parts
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +195,13 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
 def _clause_to_z3(clause_str: str, env: Dict[str, Any]) -> Optional[Any]:
     """Parse a clause string to Z3; return None if unsupported."""
     try:
+        parts = _conditional_parts(clause_str)
+        if parts is not None:  # "if cond: clause" -> Implies(cond, clause), as in contract_verifier
+            cond = _expr_to_z3(parts[0], env)
+            then = _expr_to_z3(parts[1], env)
+            if _is_z3_bool(cond) and _is_z3_bool(then):
+                return z3.Implies(cond, then)
+            return None
         tree = ast.parse(clause_str, mode="eval")
         return _expr_to_z3(tree.body, env)
     except Exception:
