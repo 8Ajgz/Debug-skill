@@ -39,7 +39,7 @@ except ImportError:
     Z3_AVAILABLE = False
 
 from . import z3_builtins
-from .contract_verifier import _conditional_parts
+from .contract_verifier import _conditional_parts, _expr_to_z3, seed_real_env
 
 
 # ---------------------------------------------------------------------------
@@ -121,75 +121,6 @@ class ContractSimplificationResult:
 # Z3 expression parsing (reuse the same approach as loop_verifier)
 # ---------------------------------------------------------------------------
 
-_OP_MAP = {
-    ast.Add:    lambda a, b: a + b,
-    ast.Sub:    lambda a, b: a - b,
-    ast.Mult:   lambda a, b: a * b,
-    ast.FloorDiv: lambda a, b: a / b,
-    ast.Div:    lambda a, b: a / b,
-    ast.Mod:    lambda a, b: a % b,
-    ast.Lt:     lambda a, b: a < b,
-    ast.LtE:    lambda a, b: a <= b,
-    ast.Gt:     lambda a, b: a > b,
-    ast.GtE:    lambda a, b: a >= b,
-    ast.Eq:     lambda a, b: a == b,
-    ast.NotEq:  lambda a, b: a != b,
-}
-
-
-def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
-    """Recursively convert ast.expr into a Z3 expression."""
-    if isinstance(node, ast.Constant):
-        if isinstance(node.value, bool):
-            return z3.BoolVal(node.value)
-        if isinstance(node.value, str):
-            return z3.StringVal(node.value)
-        return node.value
-    if isinstance(node, ast.Name):
-        if node.id == "True":
-            return z3.BoolVal(True)
-        if node.id == "False":
-            return z3.BoolVal(False)
-        if node.id not in env:
-            env[node.id] = z3.Int(node.id)
-        return env[node.id]
-    if isinstance(node, ast.BinOp):
-        left = _expr_to_z3(node.left, env)
-        right = _expr_to_z3(node.right, env)
-        op = _OP_MAP.get(type(node.op))
-        if op is None:
-            raise NotImplementedError(f"Unsupported BinOp: {type(node.op).__name__}")
-        return op(left, right)
-    if isinstance(node, ast.BoolOp):
-        values = [_expr_to_z3(v, env) for v in node.values]
-        if isinstance(node.op, ast.And):
-            return z3.And(*values)
-        return z3.Or(*values)
-    if isinstance(node, ast.UnaryOp):
-        operand = _expr_to_z3(node.operand, env)
-        if isinstance(node.op, ast.Not):
-            return z3.Not(operand)
-        if isinstance(node.op, ast.USub):
-            return -operand
-        raise NotImplementedError(f"Unsupported UnaryOp: {type(node.op).__name__}")
-    if isinstance(node, ast.Compare):
-        left = _expr_to_z3(node.left, env)
-        result = None
-        for op, comparator in zip(node.ops, node.comparators):
-            right = _expr_to_z3(comparator, env)
-            cmp = _OP_MAP.get(type(op))
-            if cmp is None:
-                raise NotImplementedError(f"Unsupported Compare: {type(op).__name__}")
-            part = cmp(left, right)
-            result = part if result is None else z3.And(result, part)
-            left = right
-        return result
-    if isinstance(node, ast.Call):
-        result = z3_builtins.try_call_to_z3(node, env, _expr_to_z3)
-        if result is not None:
-            return result
-        raise NotImplementedError(f"Unsupported call: {ast.dump(node.func)}")
-    raise NotImplementedError(f"Unsupported node type: {type(node).__name__}")
 
 
 def _clause_to_z3(clause_str: str, env: Dict[str, Any]) -> Optional[Any]:
@@ -310,6 +241,7 @@ class ContractSimplifier:
             return result
 
         env: Dict[str, Any] = {}
+        seed_real_env(requires + ensures, env)
         z3_builtins.seed_string_env(requires + ensures, env)
 
         # Parse all clauses up front — unparseable ones are kept automatically

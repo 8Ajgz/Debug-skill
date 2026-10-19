@@ -10,11 +10,13 @@
 - `src/pyprover/property_tester.py`: `property_test()` checks Python contracts with Hypothesis (optional dependency); clauses are evaluated without `eval()`
 - `src/pyprover/invariant_templates.py`: BinarySearchBounds, MinMaxLoop, SumAccumulator, FilterCount, Scan, StateMachine, ported from v8.2; checked against reference loops in tests
 - Conditional postconditions: `# Post: if <cond>: <clause>` is checked as Implies(cond, clause) by `ContractVerifier`, `ContractSimplifier` and `property_test`. The `else` form is skipped, not guessed
+- Float precision: float literals are exact Z3 reals, variables in float clauses or annotated `float` are Real, and `/` is real division. Before this, float contracts were checked over the integers, which gave wrong verdicts in both directions
 - `docs/EVOLUTION.md`: release history and feature-loss audit of the archive
 
 ### Fixed
 
 - `rust_debug/borrow_checker.py` linked a binary named after the temp file into the working directory on every check. Now uses `--emit=metadata --out-dir <tempdir>`
+- `ContractSimplifier` now uses the verifier's expression translator instead of its own copy
 - `pytest.ini` sets `pythonpath = src .`, so plain `pytest` collects `common.*` imports
 
 ## [2.9.6] - 2026-07-11 (regression fix: v2.9.5's borrow-checker category filter broke 2 existing tests; testpaths gap that hid them also fixed)

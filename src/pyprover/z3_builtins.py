@@ -65,14 +65,8 @@ Supported:
 
 Explicitly NOT supported, honestly (returns None -> caller's existing
 "non-arithmetic, skipped" path, never a silent wrong answer):
-  - float precision / scaled-integer float reasoning (PyProver v6.1/v7.0's
-    FloatWorkAround). Z3 has real Real/FP sorts, same reasoning as above for
-    strings -- but wiring float-typed variables through three call sites
-    that currently assume every bare Name is an Int is a bigger, separately-
-    scoped change (needs the same kind of type-inference pre-pass as strings,
-    for a different sort, with different comparison-operator implications)
-    and isn't attempted in this pass. Flagged in roadmap.md, not silently
-    dropped.
+  - float scaled-integer reasoning (PyProver v6.1/v7.0's FloatWorkAround).
+    Floats are real-sorted instead; see seed_real_env() in contract_verifier.py.
   - len() of a literal (e.g. `len([1,2,3])`) -- only bare-name and simple
     attribute-free arguments are given a stable Z3 identity; a literal
     collection's length is a constant Python could just compute, and this

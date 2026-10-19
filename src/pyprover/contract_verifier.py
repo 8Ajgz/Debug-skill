@@ -69,7 +69,7 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
         if isinstance(node.value, int):
             return node.value
         if isinstance(node.value, float):
-            return node.value
+            return z3.RealVal(node.value)  # exact decimal value, e.g. 0.1 is 1/10
         if isinstance(node.value, str):
             return z3.StringVal(node.value)
         raise NotImplementedError(f"Unsupported constant type: {type(node.value)}")
@@ -85,6 +85,12 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
     if isinstance(node, ast.BinOp):
         left = _expr_to_z3(node.left, env)
         right = _expr_to_z3(node.right, env)
+        if isinstance(node.op, ast.Div):
+            # Python's / is always real division. Z3's Int / is integer division.
+            return _as_real(left) / _as_real(right)
+        if isinstance(node.op, (ast.FloorDiv, ast.Mod)) and (_is_real(left) or _is_real(right)):
+            # Python floor and modulo on floats are not Z3 real operations; skip the clause.
+            raise NotImplementedError("floor division and modulo are not defined over reals here")
         op = _OP_MAP.get(type(node.op))
         if op is None:
             raise NotImplementedError(f"Unsupported BinOp: {type(node.op).__name__}")
@@ -119,6 +125,61 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
             return result
         raise NotImplementedError(f"Unsupported call: {ast.dump(node.func)}")
     raise NotImplementedError(f"Unsupported AST node: {type(node).__name__}")
+
+
+def _is_real(e: Any) -> bool:
+    """True if e is a Z3 Real expression (python floats count as real)."""
+    return isinstance(e, float) or (isinstance(e, z3.ArithRef) and e.is_real())
+
+
+def _as_real(e: Any) -> Any:
+    """Convert a python number or Z3 Int expression to a Z3 Real expression."""
+    if isinstance(e, bool):
+        return e
+    if isinstance(e, (int, float)):
+        return z3.RealVal(e)
+    if isinstance(e, z3.ArithRef) and e.is_int():
+        return z3.ToReal(e)
+    return e
+
+
+def _has_float_literal(tree: ast.AST) -> bool:
+    return any(isinstance(n, ast.Constant) and isinstance(n.value, float) for n in ast.walk(tree))
+
+
+def float_annotated_params(code: str) -> List[str]:
+    """Names of parameters annotated ``float`` in any function defined in code."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    return [
+        arg.arg
+        for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+        for arg in node.args.args
+        if isinstance(arg.annotation, ast.Name) and arg.annotation.id == "float"
+    ]
+
+
+def seed_real_env(clauses: List[str], env: Dict[str, Any], float_params: List[str] = ()) -> None:
+    """Create Real-sorted variables before any clause is translated.
+
+    A name is Real if it is in float_params, or if it appears in a clause that
+    contains a float literal. Variables are created on first use otherwise, as
+    Int, so this must run first. Real is the right model for floats: anything
+    proven over the reals also holds for every float input.
+    """
+    real_names = set(float_params)
+    for clause in clauses:
+        try:
+            tree = ast.parse(clause.strip(), mode="exec")
+        except SyntaxError:
+            continue
+        if _has_float_literal(tree):
+            real_names |= {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    for name in real_names:
+        if name not in env and name not in ("True", "False"):
+            env[name] = z3.Real(name)
 
 
 def _conditional_parts(clause: str) -> Optional[Tuple[ast.expr, ast.expr]]:
@@ -344,6 +405,7 @@ class ContractVerifier:
             return result
 
         env: Dict[str, Any] = {}
+        seed_real_env(all_clauses, env, float_annotated_params(code))
         z3_builtins.seed_string_env(
             contract.preconditions + contract.postconditions + contract.invariants, env,
         )
