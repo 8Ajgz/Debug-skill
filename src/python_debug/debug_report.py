@@ -845,12 +845,15 @@ class DebugReport:
                 # This is an additional transition we need to record
                 mutations.append((prev_lineno, prev_value, final_value))
             elif prev_value is None and var_name in final_state_raw:
-                # First assignment - record 0 → value
-                # Find first line where this variable appears
-                for event in self.timeline:
-                    if event.event_type == "line" and var_name in event.variables_after:
-                        mutations.insert(0, (event.lineno, None, event.variables_after[var_name]))
-                        break
+                # First assignment - record 0 → value at the first line where it appears.
+                # If it only appears after the last snapshot (assigned on the last line),
+                # attribute it to the last traced line, which is the statement that ran last.
+                line_events = [e for e in self.timeline if e.event_type == "line"]
+                first = next((e for e in line_events if e.variables_after and var_name in e.variables_after), None)
+                if first is not None:
+                    mutations.insert(0, (first.lineno, None, first.variables_after[var_name]))
+                elif line_events:
+                    mutations.insert(0, (line_events[-1].lineno, None, final_value))
         
         return mutations
     
