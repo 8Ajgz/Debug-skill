@@ -231,3 +231,22 @@ def test_crashed_formal_check_is_reported_not_completed():
     assert any(i.type == "formal_tool_error" and "pyprover crashed" in i.description
                for i in report.issues_found)
     assert DebugPhase.FORMAL not in report.phases_completed
+
+
+def test_crashed_python_phase_is_reported_not_silent(monkeypatch):
+    from src.master_debugger import phases
+
+    def boom(code):
+        raise RuntimeError("static phase crashed")
+
+    monkeypatch.setattr(phases.Phase0StaticAnalysis, "run", staticmethod(boom))
+
+    report = asyncio.run(
+        MasterDebugger(use_pyprover=False).debug_comprehensive(
+            "def f(x: int) -> int:\n    return x + 1\n", "python", phases=["static"]
+        )
+    )
+
+    assert any(i.type == "analysis_error" and "static phase crashed" in i.description
+               for i in report.issues_found)
+    assert report.overall_health != "✅ VERIFIED"

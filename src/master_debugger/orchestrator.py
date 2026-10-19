@@ -275,7 +275,14 @@ class MasterDebugger:
                     report.phases_completed.append(DebugPhase.TESTING)
                     token_cost += 200
             except Exception as e:
+                # A phase that raised did not finish. Recording it keeps the
+                # remaining phases' findings visible and stops a clean verdict.
                 print(f"[MasterDebugger] Python phase analysis error: {e}", file=sys.stderr)
+                report.issues_found.append(Issue(
+                    phase=DebugPhase.STATIC, type="analysis_error",
+                    description=f"Python phase analysis failed: {type(e).__name__}: {e}",
+                    severity="medium", confidence=0.9,
+                ))
         else:
             if "static" in phases:
                 report.phases_completed.append(DebugPhase.STATIC)
