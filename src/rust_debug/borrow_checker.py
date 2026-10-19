@@ -71,9 +71,12 @@ class BorrowCheckerParser:
             temp_file = f.name
         
         try:
-            # Run rustc with JSON output
+            # Run rustc with JSON output. --emit=metadata still runs borrow checking
+            # (like cargo check) but writes no executable; without it rustc links a
+            # binary named after the temp file into the current working directory.
             result = subprocess.run(
-                ["rustc", temp_file, "--error-format=json"],
+                ["rustc", temp_file, "--error-format=json", "--emit=metadata",
+                 "--out-dir", str(Path(temp_file).parent)],
                 capture_output=True,
                 text=True,
                 timeout=10,
