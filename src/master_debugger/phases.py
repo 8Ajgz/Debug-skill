@@ -102,7 +102,8 @@ class Phase0StaticAnalysis:
             except Exception as e:
                 result.tool_errors.append(f"semgrep: {type(e).__name__}: {e}")
 
-            result.passed = len(result.mypy_errors) == 0
+            # A phase only passes if every tool that ran also completed.
+            result.passed = len(result.mypy_errors) == 0 and not result.tool_errors
         finally:
             import os
             os.unlink(temp_path)

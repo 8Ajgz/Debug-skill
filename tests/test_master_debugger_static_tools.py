@@ -111,3 +111,29 @@ def test_mypy_timeout_reaches_the_verdict(fake_bandit_dir):
 
     assert any(i.type == "static_tool_error" and "mypy" in i.description for i in report.issues_found)
     assert report.overall_health != "✅ VERIFIED"
+
+
+def test_v5_timed_out_mypy_is_not_a_passed_phase(fake_bandit_dir):
+    from src.master_debugger.orchestrator_v5 import MasterDebuggerV5
+
+    _fake_slow_mypy(fake_bandit_dir)
+
+    report = MasterDebuggerV5().debug("def f(x: int) -> int:\n    return x + 1\n")
+
+    assert report.phase_0_static.passed is False
+    assert report.total_issues >= 1
+    assert report.confidence_score < 1.0
+
+
+def test_v5_counts_bandit_findings(fake_bandit_dir):
+    from src.master_debugger.orchestrator_v5 import MasterDebuggerV5
+
+    payload = {"results": [{
+        "test_id": "B605", "issue_severity": "HIGH",
+        "issue_text": "Starting a process with a shell", "line_number": 2,
+    }]}
+    _fake_bandit(fake_bandit_dir, f"echo '{json.dumps(payload)}'\nexit 1\n")
+
+    report = MasterDebuggerV5().debug(CODE)
+
+    assert report.total_issues >= len(report.phase_0_static.bandit_warnings) == 1

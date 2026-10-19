@@ -98,6 +98,11 @@ class MasterDebuggerV5:
         if report.phase_0_static:
             issues += len(report.phase_0_static.mypy_errors)
             issues += len(report.phase_0_static.pylint_issues)
+            # bandit and semgrep findings and failed tools count too; the
+            # orchestrator.py path already reports them as issues.
+            issues += len(report.phase_0_static.bandit_warnings)
+            issues += len(report.phase_0_static.semgrep_findings)
+            issues += len(report.phase_0_static.tool_errors)
             if report.phase_0_static.passed:
                 passed_phases += 1
         
