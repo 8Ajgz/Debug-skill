@@ -116,13 +116,15 @@ class LoopVerificationReport:
 # ---------------------------------------------------------------------------
 
 # Patterns: match  # Invariant: expr   //Invariant: expr   /* Inv: expr */
+from .contract_verifier import _DECORATOR_CONTRACT_RE, _STRING_PIECE_RE
+
 _INVARIANT_RE = re.compile(
     r"(?:#|//|/\*)\s*[Ii]nv(?:ariant)?:\s*(.*?)(?:\*/)?$"
 )
 
 
 def extract_loop_invariants(source_code: str) -> List[LoopInvariant]:
-    """Extract  # Invariant: <expr>  annotations from source_code."""
+    """Extract ``# Invariant: <expr>`` and ``@loop_invariant("<expr>")`` from source_code."""
     invariants: List[LoopInvariant] = []
     for lineno, line in enumerate(source_code.splitlines(), start=1):
         m = _INVARIANT_RE.match(line.strip())
@@ -130,6 +132,14 @@ def extract_loop_invariants(source_code: str) -> List[LoopInvariant]:
             expr = m.group(1).strip()
             if expr:
                 invariants.append(LoopInvariant(expression=expr, line_number=lineno))
+    for m in _DECORATOR_CONTRACT_RE.finditer(source_code):
+        if m.group(1) != "loop_invariant":
+            continue
+        text = "".join(a if a or not b else b for a, b in _STRING_PIECE_RE.findall(m.group(2))).strip()
+        if text:
+            line_number = source_code.count("\n", 0, m.start()) + 1
+            invariants.append(LoopInvariant(expression=text, line_number=line_number))
+    invariants.sort(key=lambda inv: inv.line_number or 0)
     return invariants
 
 
@@ -202,11 +212,47 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
             left = right
         return result
     if isinstance(node, ast.Call):
+        if (isinstance(node.func, ast.Name) and node.func.id in ("all", "any")
+                and len(node.args) == 1 and isinstance(node.args[0], ast.GeneratorExp)):
+            return _quantifier_to_z3(node.func.id, node.args[0], env)
         result = z3_builtins.try_call_to_z3(node, env, _expr_to_z3)
         if result is not None:
             return result
         raise NotImplementedError(f"Unsupported call: {ast.dump(node.func)}")
     raise NotImplementedError(f"Unsupported node type: {type(node).__name__}")
+
+
+def _quantifier_to_z3(kind: str, gen: ast.GeneratorExp, env: Dict[str, Any]) -> Any:
+    """Translate ``all(c for k in range(lo, hi))`` to ForAll, ``any(...)`` to Exists.
+
+    The bound variable is local to the quantifier. Bounds may use loop variables,
+    so a quantified invariant such as ``all(k < i for k in range(0, i))`` is checked
+    in INIT and PRESERVATION like any other invariant.
+    """
+    if len(gen.generators) != 1 or not isinstance(gen.generators[0].target, ast.Name):
+        raise NotImplementedError("quantifier needs exactly one loop variable")
+    comp = gen.generators[0]
+    if comp.ifs or comp.is_async:
+        raise NotImplementedError("quantifier filters are not supported")
+    rng = comp.iter
+    if not (isinstance(rng, ast.Call) and isinstance(rng.func, ast.Name) and rng.func.id == "range"):
+        raise NotImplementedError("quantifier domain must be range(...)")
+    if len(rng.args) == 1:
+        lo_node, hi_node = ast.Constant(value=0), rng.args[0]
+    elif len(rng.args) == 2:
+        lo_node, hi_node = rng.args
+    else:
+        raise NotImplementedError("range() takes one or two arguments in a quantifier")
+    lo = _expr_to_z3(lo_node, env)
+    hi = _expr_to_z3(hi_node, env)
+    var = z3.Int(comp.target.id)
+    inner = dict(env)
+    inner[comp.target.id] = var
+    body = _expr_to_z3(gen.elt, inner)
+    in_range = z3.And(lo <= var, var < hi)
+    if kind == "all":
+        return z3.ForAll([var], z3.Implies(in_range, body))
+    return z3.Exists([var], z3.And(in_range, body))
 
 
 def _parse_invariant_expr(expr_str: str, env: Dict[str, Any]) -> Any:

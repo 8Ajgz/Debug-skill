@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from .contract_verifier import ContractVerifier, _RESULT_ALIASES, _conditional_parts
 
 try:
-    from hypothesis import HealthCheck, assume, given, settings
+    from hypothesis import HealthCheck, assume, example, given, settings
     from hypothesis import strategies as st
     HYPOTHESIS_AVAILABLE = True
 except ImportError:
@@ -148,6 +148,7 @@ def property_test(code: str, max_examples: int = 200) -> Dict[str, Any]:
     except Exception:
         pass  # a clause that only fails on some inputs (e.g. division by zero) is handled per example
 
+    fn_node.decorator_list = []  # contract decorators are not names at run time
     namespace: Dict[str, Any] = {}
     exec(compile(ast.Module(body=[fn_node], type_ignores=[]), "<property-test>", "exec"), namespace)
     fn = namespace[fn_node.name]
@@ -169,9 +170,6 @@ def property_test(code: str, max_examples: int = 200) -> Dict[str, Any]:
                 return f"postcondition '{clause}' failed"
         return None
 
-    @settings(max_examples=max_examples, deadline=None, database=None,
-              suppress_health_check=list(HealthCheck))
-    @given(**{p: st.integers(min_value=-INT_BOUND, max_value=INT_BOUND) for p in params})
     def check(**inputs: int) -> None:
         try:
             if not all(evaluate_clause(c, dict(inputs)) for c in contract.preconditions):
@@ -186,6 +184,14 @@ def property_test(code: str, max_examples: int = 200) -> Dict[str, Any]:
         if problem is not None:
             state["failures"].append((dict(inputs), problem))
             raise AssertionError(problem)
+
+    # Random sampling can miss a bug that only occurs at one point (x == 1 among
+    # 2001 values), so boundary values always run, and derandomize keeps a run reproducible.
+    check = settings(max_examples=max_examples, deadline=None, database=None, derandomize=True,
+                     suppress_health_check=list(HealthCheck))(
+        given(**{p: st.integers(min_value=-INT_BOUND, max_value=INT_BOUND) for p in params})(check))
+    for value in (-1, 0, 1):
+        check = example(**{p: value for p in params})(check)
 
     try:
         check()

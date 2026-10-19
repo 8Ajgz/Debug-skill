@@ -57,7 +57,8 @@ class TestPropertyTest:
         code = "# Post: result >= 0\ndef r(x):\n    return 1 // x\n"
         outcome = property_test(code)
         assert outcome["status"] == "failed"
-        assert "ZeroDivisionError" in outcome["reason"]
+        # x = -1 violates the postcondition before x = 0 raises; either is a real failure
+        assert "ZeroDivisionError" in outcome["reason"] or "postcondition" in outcome["reason"]
 
     def test_postcondition_error_discards_input_not_fails(self):
         code = "# Post: 10 // x > -1000\ndef p(x):\n    return x\n"

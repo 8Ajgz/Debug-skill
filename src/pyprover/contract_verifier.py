@@ -32,6 +32,29 @@ class ContractInputTooLargeError(ValueError):
     """Raised when input code exceeds the size this verifier will scan."""
 
 
+_DECORATOR_CONTRACT_RE = re.compile(
+    r"@(requires|ensures|loop_invariant)\s*\(\s*((?:(?:\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*')\s*)+)\)",
+    re.DOTALL,
+)
+_STRING_PIECE_RE = re.compile(r"\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)'")
+
+
+def _decorator_clauses(code: str) -> List[Tuple[str, str]]:
+    """Read ``@requires("...")``, ``@ensures("...")`` and ``@loop_invariant("...")``.
+
+    The argument may be several adjacent string literals split across lines, as in
+    the v13 layout that the old single-line extractor missed. Works in any language,
+    since it only looks for the decorator text.
+    """
+    found: List[Tuple[str, str]] = []
+    for match in _DECORATOR_CONTRACT_RE.finditer(code):
+        kind, pieces = match.group(1), match.group(2)
+        text = "".join(a if a or not b else b for a, b in _STRING_PIECE_RE.findall(pieces)).strip()
+        if text:
+            found.append((kind, text))
+    return found
+
+
 @dataclass
 class ContractSpec:
     preconditions: List[str]
@@ -353,6 +376,14 @@ class ContractVerifier:
                 clause = inv_match.group(1).strip()
                 if clause:
                     spec.invariants.append(clause)
+
+        for kind, text in _decorator_clauses(code):
+            if kind == "requires":
+                spec.preconditions.append(text)
+            elif kind == "ensures":
+                spec.postconditions.append(text)
+            else:
+                spec.invariants.append(text)
 
         return spec
 

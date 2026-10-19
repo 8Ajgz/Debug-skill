@@ -11,6 +11,7 @@ Legacy compat: MasterDebuggerV5 (src/master_debugger/orchestrator_v5.py)
 from .orchestrator import MasterDebugger          # v6 — active orchestrator
 from .orchestrator_v5 import MasterDebuggerV5     # v5 — legacy compat
 from .types import RiskLevel, UnifiedReport
+from .fix_verifier import FixVerification, verify_fix
 
 __version__ = "6.0.0"
-__all__ = ['MasterDebugger', 'MasterDebuggerV5', 'RiskLevel', 'UnifiedReport']
+__all__ = ['MasterDebugger', 'MasterDebuggerV5', 'RiskLevel', 'UnifiedReport', 'FixVerification', 'verify_fix']
