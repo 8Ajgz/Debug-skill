@@ -51,4 +51,4 @@ pip install /path/to/debug-suite-1.2.skill
 
 ## License
 
-MIT
+Public Domain 
