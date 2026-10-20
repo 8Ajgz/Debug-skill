@@ -1956,6 +1956,9 @@ def _exec_stmts(
             if record is not None:
                 _bind_record(env, stmt.target.id, record)
                 continue
+            if isinstance(stmt.value, ast.List):
+                env[stmt.target.id] = _list_literal_value(stmt.value, env)  # `xs: List[int] = [...]`
+                continue
             env[stmt.target.id] = _expr_to_z3_safe(stmt.value, env)
             continue
 
