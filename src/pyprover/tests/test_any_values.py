@@ -162,7 +162,7 @@ def g(d: Dict[str, Any], k: str):
         assert r.status == "unsupported"
         assert "container of Any values" in r.reason
 
-    def test_iterating_list_of_any_is_rejected(self):
+    def test_iterating_list_of_any_counts_its_elements(self):
         code = '''
 from typing import Any, List
 
@@ -171,10 +171,26 @@ def f(xs: List[Any]):
     for x in xs:
         n = n + 1
     return n
+
+def g(xs: List[Any]):
+    return len(xs)
+'''
+        assert verify_function_equivalence(code, "f", code, "g").equivalent is True
+        _agree(code, "f", "g", [([None] * n,) for n in range(4)] + [([1, "a", {}],)])
+
+    def test_element_of_list_of_any_used_as_a_number_is_rejected(self):
+        code = '''
+from typing import Any, List
+
+def f(xs: List[Any]):
+    total = 0
+    for x in xs:
+        total = total + x
+    return total
 '''
         r = simplify_function(code, "f")
         assert r.status == "unsupported"
-        assert "list of Any values" in r.reason
+        assert "Any value" in r.reason
 
     def test_list_of_any_passed_for_list_of_int_is_rejected(self):
         code = '''

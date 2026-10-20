@@ -390,8 +390,25 @@ def _param_kind(arg: ast.arg, body: Optional[List[ast.stmt]] = None, scope: Any 
         return ("enum", named) if _enum_members(named) is not None else ("obj", named)
     if body is not None and not _reads_name(body, arg.arg):
         return "unused"
-    raise UnsupportedConstructError(
-        f"parameter '{arg.arg}' has an annotation that is not modelled: {ast.unparse(ann)}")
+    return _opaque_kind(ann)
+
+
+def _opaque_kind(ann: ast.expr) -> Any:
+    """The kind of a value whose type is not modelled. Such a value is opaque: the model
+    knows nothing about it, and every use that depends on what it is, such as an attribute,
+    an operator, or equality, is rejected where it occurs. So a value of an unmodelled type
+    is modelled soundly as an Any value, with two differences: a non-Optional type is never
+    None, and a container of unmodelled elements is a list or dict of Any values."""
+    if isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name):
+        base, sl = ann.value.id, ann.slice
+        if base in ("list", "List"):
+            return ("list", "any")
+        if base in ("dict", "Dict") and isinstance(sl, ast.Tuple) and len(sl.elts) == 2 \
+                and _sort_name(sl.elts[0]) in ("int", "str"):
+            return ("dict", _sort_name(sl.elts[0]), "any")
+        if base == "Optional":
+            return "any"  # may be None, as Any may
+    return "opaque"
 
 
 def _used_as_condition(body: List[ast.stmt], name: str) -> bool:
@@ -442,6 +459,9 @@ def _make_param(kind: Any, name: str, facts: Optional[List[Any]] = None, scope: 
     if kind == "any":
         # Any may be None, so the value is an _Opt whose None flag is a Z3 Bool.
         return _Opt(z3.Bool(name + "__none"), _AnyValue(name + "__val"))
+    if kind == "opaque":
+        # A value of an unmodelled, non-Optional type: never None.
+        return _Opt(z3.BoolVal(False), _AnyValue(name + "__val"))
     if kind == "bool":
         return z3.Bool(name)
     if kind == "str":
@@ -620,16 +640,17 @@ def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
     if _is_enumerate(stmt.iter):
         if not isinstance(stmt.iter.args[0], ast.Name):
             raise UnsupportedConstructError("enumerate is only modelled over a list parameter or literal")
-        seq = env[stmt.iter.args[0].id]
+        list_name = stmt.iter.args[0].id
+        seq = env[list_name]
         indexed, element = True, True
     elif isinstance(stmt.iter, ast.Name):
-        seq = env[stmt.iter.id]
+        list_name = stmt.iter.id
+        seq = env[list_name]
         indexed, element = False, True  # the target takes seq.items[k]
     else:
-        seq = env[stmt.iter.args[0].args[0].id]
+        list_name = stmt.iter.args[0].args[0].id
+        seq = env[list_name]
         indexed, element = False, False  # the target takes the index k, which uses the length alone
-    if element and seq.opaque:
-        raise UnsupportedConstructError("iterating a list of Any values is not modelled")
     names = _loop_names(stmt, indexed)
     bound_before = {n: n in env and not isinstance(env[n], _Unbound) for n in names}
 
@@ -642,7 +663,16 @@ def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
         guard = seq.length > k
         iter_env = dict(current)
         iter_env[_PATH_KEY] = z3.And(_path_of(current), guard)
-        if indexed:
+        if seq.opaque:
+            # An element of an opaque list is an opaque value named for its index, so it is
+            # the same value in every use within the iteration (see _element_value).
+            element_value = _element_value(list_name, k)
+            if indexed:
+                iter_env[names[0]] = z3.IntVal(k)
+                iter_env[names[1]] = element_value
+            else:
+                iter_env[names[0]] = element_value if element else z3.IntVal(k)
+        elif indexed:
             iter_env[names[0]] = z3.IntVal(k)
             iter_env[names[1]] = z3.Select(seq.items, z3.IntVal(k))
         else:
@@ -657,12 +687,21 @@ def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
                 f"variable(s) {sorted(new_names)} first bound inside a container loop "
                 "may be unbound after it")
         merged = _merge_envs(guard, flow[1], current, current)
+        if seq.opaque:
+            for n in names:
+                merged.pop(n, None)  # each iteration binds its own element value
         current = {**current, **merged}
     for n in names:
-        if not bound_before[n]:
-            # Python leaves the target bound only if the list is non-empty.
+        if seq.opaque or not bound_before[n]:
+            # Python leaves the target bound only if the list is non-empty, and which element
+            # is last is not known for an opaque list.
             current[n] = _UNBOUND
     return current
+
+
+def _element_value(list_name: str, index: int) -> "_Opt":
+    """The value of element `index` of a list of Any values: optional, as Any may be None."""
+    return _Opt(z3.Bool(f"{list_name}[{index}]__none"), _AnyValue(f"{list_name}[{index}]"))
 
 
 def _unroll_literal_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) -> Dict[str, Any]:
@@ -1121,8 +1160,8 @@ class _ContainerRewriter(ast.NodeTransformer):
             if value is None or value.classdef is not kind[1]:
                 raise UnsupportedConstructError("an enum parameter needs a value of the same enum")
             return value
-        if kind == "any":
-            return self._any_argument(node)
+        if kind in ("any", "opaque"):
+            return self._any_argument(node, allow_none=kind == "any")
         if isinstance(kind, tuple) and kind[0] == "list":
             if isinstance(node, ast.List):
                 if kind[1] == "any":
@@ -1148,14 +1187,15 @@ class _ContainerRewriter(ast.NodeTransformer):
             return _Opt(z3.BoolVal(False), term)
         return _coerce(_as_z3_value(_expr_to_z3_safe(node, self.env)), kind)
 
-    def _any_argument(self, node: ast.expr) -> Any:
-        """The value passed for an Any parameter: an Any value passed on unchanged, or None."""
+    def _any_argument(self, node: ast.expr, allow_none: bool = True) -> Any:
+        """The value passed for an Any parameter: an Any value passed on unchanged, or None.
+        A parameter of an unmodelled, non-Optional type takes no None."""
         if isinstance(node, ast.Name) and isinstance(self.env.get(node.id), _Opt) and isinstance(
                 self.env[node.id].value, _AnyValue):
             return self.env[node.id]
-        if isinstance(node, ast.Constant) and node.value is None:
+        if allow_none and isinstance(node, ast.Constant) and node.value is None:
             return _Opt(z3.BoolVal(True), _AnyValue("None"))
-        raise UnsupportedConstructError("an Any parameter takes an Any value unchanged, or None")
+        raise UnsupportedConstructError("an argument for this parameter must be an opaque value passed on unchanged")
 
     def _default(self, kind: Any, node: ast.expr) -> Any:
         """The value of a parameter the call leaves to its default, which must be a literal,
@@ -1165,10 +1205,10 @@ class _ContainerRewriter(ast.NodeTransformer):
             if value is None or value.classdef is not kind[1]:
                 raise UnsupportedConstructError("an enum default must be a member of that enum")
             return value
-        if kind == "any":
+        if kind in ("any", "opaque"):
             if isinstance(node, ast.Constant) and node.value is None:
                 return _Opt(z3.BoolVal(True), _AnyValue("None"))
-            raise UnsupportedConstructError("an Any default is only modelled as None")
+            raise UnsupportedConstructError("an opaque default is only modelled as None")
         if not isinstance(node, ast.Constant):
             raise UnsupportedConstructError("only a literal default value is modelled")
         if isinstance(kind, tuple) and kind[0] == "opt":

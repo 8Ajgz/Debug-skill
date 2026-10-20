@@ -120,4 +120,4 @@ class TestAnnotations:
     def test_unmodelled_annotation_rejected(self, ann):
         r = simplify_function(f"def f(x: {ann}):\n    return x\n", "f")
         assert r.status == "unsupported"
-        assert "not modelled" in r.reason
+        assert "Any value" in r.reason  # an unmodelled type is opaque, and returning it is rejected

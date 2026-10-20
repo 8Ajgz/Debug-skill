@@ -91,7 +91,7 @@ def g(xs: List[int]):
     _agree(code, "f", "g", [(xs,) for xs in lists])
 
 
-def test_enumerate_element_of_list_of_any_is_rejected():
+def test_enumerate_over_list_of_any_uses_the_index():
     code = '''
 from typing import Any, List
 
@@ -100,6 +100,12 @@ def f(xs: List[Any]):
     for i, v in enumerate(xs):
         total = total + i
     return total
+
+def g(xs: List[Any]):
+    total = 0
+    for i in range(len(xs)):
+        total = total + i
+    return total
 '''
-    r = simplify_function(code, "f")
-    assert r.status == "unsupported"
+    assert verify_function_equivalence(code, "f", code, "g").equivalent is True
+    _agree(code, "f", "g", [([None] * n,) for n in range(5)])
