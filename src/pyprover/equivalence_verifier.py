@@ -1172,6 +1172,10 @@ class _ContainerRewriter(ast.NodeTransformer):
                 return c
             raise UnsupportedConstructError("a list parameter needs a list of the same element type")
         if isinstance(kind, tuple) and kind[0] == "dict":
+            if isinstance(node, ast.Dict):
+                if kind[2] == "any":
+                    raise UnsupportedConstructError("a dict literal of Any values is not modelled")
+                return _dict_literal_value(node, self.env)
             c = self._container(node)
             if isinstance(c, _Map) and c.opaque == (kind[2] == "any"):
                 return c
@@ -1748,6 +1752,38 @@ def _same_result(a: Any, b: Any) -> Any:
     return _as_z3_value(a) == _as_z3_value(b)
 
 
+_DEFAULT_OF_SORT = {z3.RealSort(): z3.RealVal(0), z3.IntSort(): z3.IntVal(0),
+                    z3.StringSort(): z3.StringVal(""), z3.BoolSort(): z3.BoolVal(False)}
+
+
+def _dict_literal_value(node: ast.Dict, env: Dict[str, Any]) -> _Map:
+    """A dict literal with int or str keys and scalar values, each of one sort.
+
+    As in Python, the pairs are evaluated in order, and a repeated key keeps its last
+    value. An empty literal has no key sort, so a key of the wrong sort used on it is
+    rejected when it is used (see _as_key_term).
+    """
+    if any(k is None for k in node.keys):
+        raise UnsupportedConstructError("a dict literal with ** unpacking is not modelled")
+    pairs = [(_as_z3_value(_expr_to_z3_safe(k, env)), _as_z3_value(_expr_to_z3_safe(v, env)))
+             for k, v in zip(node.keys, node.values)]
+    if not pairs:
+        return _Map(z3.K(z3.IntSort(), z3.BoolVal(False)), z3.K(z3.IntSort(), z3.IntVal(0)))
+    key_sort, value_sort = pairs[0][0].sort(), pairs[0][1].sort()
+    if key_sort not in (z3.IntSort(), z3.StringSort()):
+        raise UnsupportedConstructError("dict literal keys must be int or str")
+    if value_sort not in _DEFAULT_OF_SORT:
+        raise UnsupportedConstructError("dict literal values must be int, float, str or bool")
+    present = z3.K(key_sort, z3.BoolVal(False))
+    values = z3.K(key_sort, _DEFAULT_OF_SORT[value_sort])
+    for key, value in pairs:
+        if key.sort() != key_sort or value.sort() != value_sort:
+            raise UnsupportedConstructError("dict literal keys and values must each share one sort")
+        present = z3.Store(present, key, z3.BoolVal(True))
+        values = z3.Store(values, key, value)
+    return _Map(present, values)
+
+
 def _list_literal_value(node: ast.List, env: Dict[str, Any]) -> _Seq:
     values = [_as_z3_value(_expr_to_z3_safe(elt, env)) for elt in node.elts]
     if not values:
@@ -2056,6 +2092,9 @@ def _exec_stmts(
             if isinstance(stmt.value, ast.List):
                 env[stmt.target.id] = _list_literal_value(stmt.value, env)  # `xs: List[int] = [...]`
                 continue
+            if isinstance(stmt.value, ast.Dict):
+                env[stmt.target.id] = _dict_literal_value(stmt.value, env)  # `d: Dict[str, int] = {...}`
+                continue
             env[stmt.target.id] = _expr_to_z3_safe(stmt.value, env)
             continue
 
@@ -2077,6 +2116,10 @@ def _exec_stmts(
             if (len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
                     and isinstance(stmt.value, ast.List)):
                 env[stmt.targets[0].id] = _list_literal_value(stmt.value, env)
+                continue
+            if (len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                    and isinstance(stmt.value, ast.Dict)):
+                env[stmt.targets[0].id] = _dict_literal_value(stmt.value, env)
                 continue
             enum_value = _enum_operand(stmt.value, env)
             if enum_value is not None and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
