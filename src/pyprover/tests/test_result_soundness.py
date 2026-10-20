@@ -53,14 +53,14 @@ def f(arr):
     assert _verify(code)["verified"] is True
 
 
-def test_branching_body_is_inconclusive_not_verified():
+def test_while_loop_body_is_inconclusive_not_verified():
     code = """
 def f(x):
     # Pre: x >= 0
     # Post: result >= 0
-    if x > 5:
-        return x
-    return x * 2
+    while x > 5:
+        x = x - 1
+    return x
 """
     result = _verify(code)
     assert result["verified"] is False
@@ -75,7 +75,7 @@ def test_no_annotations_is_inconclusive_not_verified():
 
 
 def test_inconclusive_result_is_not_reported_as_failure():
-    result = _verify("def f(x):\n    # Post: result >= 0\n    if x:\n        return x\n    return 0\n")
+    result = _verify("def f(x):\n    # Post: result >= 0\n    while x:\n        x = x - 1\n    return x\n")
     assert result.get("inconclusive") is True
     assert not any(d.startswith("FAIL") for d in result["details"])
 
@@ -147,3 +147,162 @@ def f(y):
     return 5
 """
     assert _verify(code)["verified"] is True
+
+
+def test_if_else_both_paths_checked():
+    code = """
+def f(x):
+    # Pre: x >= 0
+    # Post: result >= 0
+    if x > 5:
+        return x
+    else:
+        return x * 2
+"""
+    assert _verify(code)["verified"] is True
+
+
+def test_false_claim_on_one_branch_fails():
+    code = """
+def f(x):
+    # Pre: x >= 0
+    # Post: result >= 1
+    if x > 5:
+        return x
+    return 0
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result["postconditions_ok"] is False
+
+
+def test_assignment_inside_branch_is_merged_after_it():
+    code = """
+def f(x):
+    # Pre: x >= 0
+    # Post: result >= 0
+    y = 0
+    if x > 5:
+        y = x
+    else:
+        y = x * 2
+    return y
+"""
+    assert _verify(code)["verified"] is True
+
+
+def test_constant_range_loop_is_unrolled():
+    code = """
+def f(x):
+    # Pre: x >= 0
+    # Post: result == 3
+    total = 0
+    for i in range(3):
+        total = total + i
+    return total
+"""
+    assert _verify(code)["verified"] is True
+
+
+def test_wrong_loop_result_fails():
+    code = """
+def f(x):
+    # Pre: x >= 0
+    # Post: result == 4
+    total = 0
+    for i in range(3):
+        total = total + i
+    return total
+"""
+    assert _verify(code)["verified"] is False
+
+
+def test_return_inside_loop_stops_iteration():
+    code = """
+def f(x):
+    # Pre: x >= 0
+    # Post: result == 1
+    for i in range(5):
+        if i == 1:
+            return i
+    return 0
+"""
+    assert _verify(code)["verified"] is True
+
+
+def test_symbolic_range_bound_is_inconclusive():
+    code = """
+def f(n):
+    # Pre: n >= 0
+    # Post: result >= 0
+    total = 0
+    for i in range(n):
+        total = total + i
+    return total
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result.get("inconclusive") is True
+
+
+def test_subscript_write_is_inconclusive():
+    code = """
+def f(arr):
+    # Pre: len(arr) > 0
+    # Post: result >= 0
+    arr[0] = 5
+    return 5
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result.get("inconclusive") is True
+
+
+def test_attribute_write_is_inconclusive():
+    code = """
+def f(obj):
+    # Pre: obj.n >= 0
+    # Post: result >= 0
+    obj.n = -1
+    return 5
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result.get("inconclusive") is True
+
+
+def test_impure_call_statement_is_inconclusive():
+    code = """
+def f(x):
+    # Pre: x >= 0
+    # Post: result >= 0
+    print(x)
+    return x
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result.get("inconclusive") is True
+
+
+def test_pure_builtin_call_statement_is_skipped():
+    code = """
+def f(x):
+    # Pre: x >= 0
+    # Post: result >= 0
+    len(str(x))
+    return x
+"""
+    assert _verify(code)["verified"] is True
+
+
+def test_path_without_return_is_inconclusive():
+    code = """
+def f(x):
+    # Pre: x >= 0
+    # Post: result >= 0
+    if x > 5:
+        return x
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result.get("inconclusive") is True

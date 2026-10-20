@@ -56,14 +56,25 @@ def _decorator_clauses(code: str) -> List[Tuple[str, str]]:
     return found
 
 
+# Bounds that keep inlining finite. Over-budget or over-long loops are unproven.
+_MAX_UNROLL = 16         # iterations a constant range() loop may be unrolled into
+_MAX_STATEMENTS = 2000   # statements executed across all paths, counting branch duplication
+_PURE_CALLS = frozenset({"len", "abs", "min", "max"})
+
+
+class _Unmodelled(Exception):
+    """A body construct the inliner cannot express as one expression."""
+
+
 def _inlined_return_expr(code: str) -> Optional[ast.expr]:
     """Return the function's result as one expression over its parameters.
 
-    Supported body: plain ``name = expr`` or ``name: T = expr`` statements, then a
-    final ``return expr``. Each earlier name is inlined into later ones, so
-    ``y = x * 2; return y + 1`` becomes ``x * 2 + 1``. Docstrings are ignored.
-    Anything else (``if``, loops, calls as statements, subscript or attribute
-    writes, several functions) returns None, so ``result`` cannot be checked.
+    Modelled: ``name = expr`` and ``name: T = expr``, ``if``/``else`` (each path
+    runs to its own return, merged as a conditional expression), ``for`` over a
+    constant ``range()`` (unrolled up to ``_MAX_UNROLL`` iterations), ``pass``,
+    docstrings, and calls to pure builtins used as statements. Anything else,
+    including ``while``, subscript or attribute writes, other calls as statements,
+    and paths that fall off the end, returns None so ``result`` is not proven.
     """
     try:
         tree = ast.parse(code)
@@ -72,24 +83,92 @@ def _inlined_return_expr(code: str) -> Optional[ast.expr]:
     funcs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
     if len(funcs) != 1:
         return None
-    body = [
-        s for s in funcs[0].body
-        if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))
-    ]
-    if not body or not isinstance(body[-1], ast.Return) or body[-1].value is None:
+    try:
+        return _run(funcs[0].body, {}, [0])
+    except _Unmodelled:
         return None
 
-    bindings: Dict[str, ast.expr] = {}
-    for stmt in body[:-1]:
-        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
-            target, value = stmt.targets[0].id, stmt.value
-        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
-            target, value = stmt.target.id, stmt.value
-        else:
-            return None
-        bindings[target] = _inline_names(value, bindings)
 
-    return _inline_names(body[-1].value, bindings)
+def _run(stmts: List[ast.stmt], bindings: Dict[str, ast.expr], budget: List[int]) -> ast.expr:
+    """Symbolically run ``stmts`` and return the expression for the value returned."""
+    for index, stmt in enumerate(stmts):
+        budget[0] += 1
+        if budget[0] > _MAX_STATEMENTS:
+            raise _Unmodelled("too many statements across branches")
+        rest = stmts[index + 1:]
+        if isinstance(stmt, ast.Return):
+            if stmt.value is None:
+                raise _Unmodelled("bare return")
+            return _inline_names(stmt.value, bindings)
+        if isinstance(stmt, ast.Pass) or _is_pure_statement(stmt):
+            continue
+        if isinstance(stmt, ast.Assign):
+            if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
+                raise _Unmodelled("write to a non-name target")
+            bindings[stmt.targets[0].id] = _inline_names(stmt.value, bindings)
+            continue
+        if isinstance(stmt, ast.AnnAssign):
+            if not isinstance(stmt.target, ast.Name) or stmt.value is None:
+                raise _Unmodelled("annotation without a name target or value")
+            bindings[stmt.target.id] = _inline_names(stmt.value, bindings)
+            continue
+        if isinstance(stmt, ast.If):
+            test = _inline_names(stmt.test, bindings)
+            then_expr = _run(stmt.body + rest, dict(bindings), budget)
+            else_expr = _run(stmt.orelse + rest, dict(bindings), budget)
+            return ast.IfExp(test=test, body=then_expr, orelse=else_expr)
+        if isinstance(stmt, ast.For):
+            return _run(_unroll(stmt) + rest, bindings, budget)
+        raise _Unmodelled(type(stmt).__name__)
+    raise _Unmodelled("a path ends without a return")
+
+
+def _is_pure_statement(stmt: ast.stmt) -> bool:
+    """Docstrings and calls to pure builtins have no effect, so they can be skipped."""
+    if not isinstance(stmt, ast.Expr):
+        return False
+    value = stmt.value
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        return True
+    return (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Name)
+        and value.func.id in _PURE_CALLS
+    )
+
+
+def _unroll(loop: ast.For) -> List[ast.stmt]:
+    """Expand ``for v in range(<int constants>)`` into one assignment and body per value."""
+    if loop.orelse or not isinstance(loop.target, ast.Name):
+        raise _Unmodelled("loop with else or a non-name target")
+    call = loop.iter
+    if not (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "range"
+        and not call.keywords
+        and 1 <= len(call.args) <= 3
+    ):
+        raise _Unmodelled("only range() loops are unrolled")
+    bounds = []
+    for arg in call.args:
+        if not (isinstance(arg, ast.Constant) and type(arg.value) is int):
+            raise _Unmodelled("range() bound is not an integer constant")
+        bounds.append(arg.value)
+    try:
+        values = list(range(*bounds))
+    except ValueError:
+        raise _Unmodelled("range() step is zero")
+    if len(values) > _MAX_UNROLL:
+        raise _Unmodelled(f"range() loop longer than {_MAX_UNROLL} iterations")
+    unrolled: List[ast.stmt] = []
+    for value in values:
+        unrolled.append(ast.Assign(
+            targets=[ast.Name(id=loop.target.id, ctx=ast.Store())],
+            value=ast.Constant(value=value),
+        ))
+        unrolled.extend(loop.body)
+    return unrolled
 
 
 class _NameInliner(ast.NodeTransformer):
@@ -206,6 +285,15 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
             result = part if result is None else z3.And(result, part)
             left = right
         return result
+    if isinstance(node, ast.IfExp):
+        test = _expr_to_z3(node.test, env)
+        if isinstance(test, bool):
+            test = z3.BoolVal(test)
+        then_val = _expr_to_z3(node.body, env)
+        else_val = _expr_to_z3(node.orelse, env)
+        if _is_real(then_val) or _is_real(else_val):
+            then_val, else_val = _as_real(then_val), _as_real(else_val)
+        return z3.If(test, then_val, else_val)
     if isinstance(node, ast.Call):
         result = z3_builtins.try_call_to_z3(node, env, _expr_to_z3)
         if result is not None:

@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
-- PyProver: a postcondition that mentions `result` was reported verified when it was only satisfiable, so a false one such as `Post: result < 0` for `return x * 2` with `Pre: x >= 0` passed. The return expression is now substituted for `result` and the preconditions must imply it. Straight-line bodies (`name = expr` assignments, then `return`) are inlined and checked this way. `if`, loops and other statements stay inconclusive.
+- PyProver: a postcondition that mentions `result` was reported verified when it was only satisfiable, so a false one such as `Post: result < 0` for `return x * 2` with `Pre: x >= 0` passed. The return expression is now substituted for `result` and the preconditions must imply it. Bodies made of `name = expr` assignments, `if`/`else` (each path merged as a conditional), `for` over a constant `range()` (unrolled up to 16 iterations) and pure builtin calls as statements are inlined and checked this way. `while`, loops over a symbolic range, subscript or attribute writes, impure calls as statements, and paths without a return stay inconclusive.
 - PyProver: code with no contract annotations, a body that is not a single return, a Z3 timeout, or a skipped postcondition now reports `verified: false` with `inconclusive: true`, not a pass. The bridge reports these as INCONCLUSIVE, not FAILED.
 - `fix_verifier`: an inconclusive formal result is treated as "not checked", not as a rejected fix.
 
