@@ -8,6 +8,14 @@
 
 - PyProver `verify_function_equivalence`: a function that returns a dataclass built by a constructor call is compared field by field (roadmap §24). A record is built from the dataclass's declared fields, or by its own `__init__`, which runs on a fresh object. A field may be a scalar or an enum member. Records join across branches and can be bound to a name and read field by field. A plain class, `eq=False`, a class that defines `__eq__`, a base class, `__post_init__`, or a non-scalar field is not compared. `simplify_function` reports a record-valued function as unsupported, since a record has no single simplified expression.
 
+
+- PyProver `simplify_function` / `verify_function_equivalence`: values of unmodelled types are opaque (roadmap §25). A parameter or field of a type the model does not know (`Path`, an `ast` node, a library class) is an opaque value. The only uses modelled are passing it on, a `None` test, and `len` or a loop over a list of them; every other use is rejected where it occurs. A non-`Optional` type is never `None`.
+- PyProver: `Any` is opaque and may be `None`, and `List[Any]` and `Dict[str, Any]` are containers of opaque values. Their length and key membership are modelled, and an element is read only in a loop, as a fresh opaque value named for its index.
+- PyProver: list literals bound by an annotated assignment (`xs: List[int] = [...]`), and dict literals bound by an assignment, plain or annotated, with int or str keys and scalar values of one sort (roadmap §25).
+- PyProver: loops over a tuple or list literal unroll over its elements, and `for i, x in enumerate(xs)` unrolls over a list. A loop over a list field of an object (`for x in self.items`, or `range(len(self.items))`) unrolls over the list the model knows. A loop over a call result stays unsupported, since iterating a call can raise.
+- PyProver: a module name that the module sets only to `True` or `False` (for example `_OK`, set in a `try` block) is one unknown Boolean in every use. A name also bound by a def, class, import, loop, or `global` statement is not a flag.
+- PyProver: `@staticmethod` calls are inlined with no `self`, through an object or through the class name. Keyword arguments bind by name in inlined calls.
+- PyProver: `isinstance` of an opaque value is one Boolean per value and type, so repeated tests agree, and `None` is an instance only of `object`. A counterexample that depends on these Booleans is reported as unsupported, since the types are not related to each other.
 ### Fixed
 
 - Free names: a name that is neither a parameter nor a local (a module global, or a builtin other than `abs`, `min`, `max`, `len`, `isinstance` and `range`) was read as an unknown integer, so a function could be proven equivalent or simplified on a wrong model of that name. It is rejected now. Standalone expressions, which have free variables by design, are unchanged.
