@@ -31,6 +31,20 @@ pytestmark = pytest.mark.skipif(z3 is None, reason="z3-solver not installed")
 GRID = range(-6, 7)
 
 
+def _eval_translation(code, name, value):
+    """Translate the function and evaluate it on one concrete value (for bool inputs)."""
+    node = _find_function(code, name)
+    expr = _function_to_symbolic(node, {}, 64)
+    import z3 as _z
+    arg = node.args.args[0].arg
+    symbol = _z.Bool(arg) if isinstance(value, bool) else _z.Int(arg)
+    solver = _z.Solver()
+    solver.add(symbol == (_z.BoolVal(value) if isinstance(value, bool) else value))
+    assert solver.check() == _z.sat
+    result = solver.model().eval(expr, model_completion=True)
+    return bool(result) if _z.is_true(result) or _z.is_false(result) else result.as_long()
+
+
 def _param_domains(code, name):
     """Input values per parameter: True/False for `bool`-annotated, else GRID."""
     node = _find_function(code, name)
@@ -216,11 +230,22 @@ class TestExpandedSubset:
         assert r.status == "unsupported"
         assert "'**'" in r.reason
 
-    def test_unannotated_bool_use_still_unsupported(self):
-        """Without an annotation the parameter is an Int, so `not flag` cannot
-        be translated. This is the documented boundary, not a regression."""
+    def test_unannotated_bool_use_is_inferred_with_note(self):
+        """An unannotated parameter used as a condition is taken to be bool. The
+        result says so, since an int passed in would behave differently."""
         r = simplify_function("def f(flag):\n    return not flag\n", "f")
-        assert r.status == "unsupported"
+        assert r.status in ("simplified", "already_simplest"), r.summary()
+        assert "taken to be bool" in r.domain
+
+    def test_unannotated_parameter_mixed_with_arithmetic_follows_python_bools(self):
+        """Python's bool is an int with values 0 and 1, so arithmetic on an inferred
+        bool is translated faithfully. The domain note still applies."""
+        src = "def f(x):\n    return (x + 1) if not x else x\n"
+        r = simplify_function(src, "f")
+        assert "taken to be bool" in r.domain
+        for x in (True, False):
+            expected = (x + 1) if not x else x
+            assert _eval_translation(src, "f", x) == expected
 
     def test_bool_annotated_equivalence(self):
         a = "def f(flag: bool):\n    if flag:\n        return 1\n    return 2\n"

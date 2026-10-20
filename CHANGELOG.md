@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Fixed
+
+- Free names: a name that is neither a parameter nor a local (a module global, or a builtin other than `abs`, `min`, `max`, `len`, `isinstance` and `range`) was read as an unknown integer, so a function could be proven equivalent or simplified on a wrong model of that name. It is rejected now. Standalone expressions, which have free variables by design, are unchanged.
+- A function that can end without a return (`__init__`, for example) is reported as ending with None, instead of "does not return a value on every path".
+- Division by a symbolic zero is rejected unless guarded or caught (see the changes above).
 - `simplify_function` / `verify_function_equivalence`: a body that returns a literal (`return 1`) failed with "Z3 expression expected", because the translator returned a Python int. It is wrapped in a Z3 term now. `return True` already worked.
 - `simplify_function`: a translator `TypeError`, `ValueError` or `AttributeError` (e.g. a string operator) is reported as unsupported, not raised.
 - `code_orchestrator`: checkpoints did not store `code_structure` or `decomposition_plan`, so a loaded checkpoint lost both. They are stored now, with every phase field, and checkpoints written before this change still load.
@@ -29,6 +33,35 @@
 - `legacy_code/`: four fragments that cannot run were moved to `legacy_code/archive/`. Each is superseded by live code, and `legacy_code/README.md` lists the replacement. Nothing was deleted.
 
 ### Added
+
+- `raise` statements: the inputs that reach one are excluded from the domain, recorded as "inputs that reach a raise statement are excluded". A function that always raises is rejected, as is a raise inside a try block.
+- `import` statements bind their names to an opaque value. Using such a name is rejected.
+- `for i in range(a, n)` with a symbolic bound `n` is unrolled like the container loops. It is exact for `n` at most `a + max_unroll`, and the domain says so.
+- `except` clauses naming exceptions this model does not track are accepted when the handler provably cannot run.
+- Fields are typed from the annotated parameter they are assigned, as well as from literals.
+
+- Writes to scalar `self` fields in methods: `self.f = e`, `self.f op= e`, and `self.f, self.g = e1, e2`. From the write on, the field has the new value for the rest of the method. Each return records the state of every field the method touches. `verify_function_equivalence` compares the returned value and the final state of every scalar field, so two methods that leave the object in different states are not equivalent. `simplify_function` simplifies only the returned value, and says so in the domain note. A write must keep the field's type. A write to a container or optional field, and a write to a field whose type is not known, are rejected. An unannotated field written a value of unknown type is rejected with a request to annotate it. Tests: `src/pyprover/tests/test_object_fields.py` (`TestWrites`), which checks the final state against Python.
+- Fix: a field's final value is looked up by the field's name. It was looked up by the name bound in the environment, so the state comparison read the initial value.
+
+- `self.field` reads in methods. A method is analysed inside its class, and each field is a symbol fixed for the call. A field is typed by a class-level or `self.x: T` annotation, or by the literals assigned to it in any method. A field assigned something of unknown type, assigned two kinds, or named like a method is rejected, and so is any field with no modelled type that the method reads. Writes to fields, calls on `self`, and using `self` as a value are rejected. `verify_function_equivalence` compares methods only within one class. Tests: `src/pyprover/tests/test_object_fields.py`, which checks reads against Python on concrete objects.
+
+- An empty list literal `[]` is a list of length 0. Every read from it is guarded out, so its element sort never matters.
+- An unannotated parameter used as a condition (`not x`, `x and y`, `if x:`) is taken to be bool, recorded as the domain note "unannotated parameters used as conditions are taken to be bool". Python's bool is an int with values 0 and 1, so arithmetic on it is translated faithfully.
+- `x in [a, b]` and `x not in [a, b]` for literal lists of scalars, as an or of equalities.
+- Tests: `src/pyprover/tests/test_container_loops.py` (empty and literal membership), `src/pyprover/tests/test_simplify_function.py` (bool inference).
+
+- `float` parameters (and `Optional[float]`, `list[float]`, `dict[K, float]`) are Z3 reals. Results that depend on one carry the note "floats are treated as exact real numbers, without rounding", since a real-valued equality need not hold for floats.
+- Division by a value that may be zero is rejected in `simplify_function` / `verify_function_equivalence`, unless the code guards it, or a handler catches `ZeroDivisionError` (or `ArithmeticError`, `Exception`). `1 / 0` is rejected. The contract and loop translators leave `/` by a non-literal unchecked, since Z3 leaves `x / 0` unspecified while Python raises.
+- A parameter whose annotation is not modelled (`Any`, a class name, `Path`, `Dict[str, Any]`, ...) is ignored if the body never reads it, since its type cannot change the result. If the body reads it, the function is rejected: `Any` admits every type, and a class brings methods, properties and aliasing that this model does not represent.
+- Tests: `src/pyprover/tests/test_floats_and_zero.py`.
+
+- `simplify_function` / `verify_function_equivalence`: `try`/`except` with one handler, catching `IndexError`, `KeyError`, `LookupError`, `TypeError` or `Exception`. Failing reads are recorded instead of rejected. The rest of the body runs only where nothing failed, and the handler runs where a caught failure happened. A failure the handler does not catch is excluded from the domain, and the domain note says so. Nested try, `else`, `finally` and `except ... as` are rejected.
+- `Optional[int|str|bool]` parameters and `x | None` annotations: `x is None` and `is not None` test a flag, and using the value requires the flag to be clear.
+- `isinstance(x, T)` for `int`, `bool`, `float`, `str`, `list` and `dict`, decided from the value's sort. Parameters are taken to have their annotated types, recorded as a domain note.
+- Parameter annotations that are not modelled (e.g. `float`, `Any`, a class name) are rejected. An annotated parameter used to be read as an int.
+- `loop_verifier` uses the shared expression translator in `contract_verifier`. `all()`/`any()` over `range()` become ForAll/Exists only when `MODEL_QUANTIFIERS` is set, which the loop verifier does. The shared translator also gets the positive-literal rule for `//` and `%`. The loop verifier's copy is removed.
+- `simplify_function` / `verify_function_equivalence` unroll `for x in xs` and `for i in range(len(xs))` over a list parameter or literal. Iteration k runs only where the length exceeds k, so the model is exact for every list up to `max_unroll` elements. Longer lists are outside that domain, and every result that uses such a loop carries `domain = "lists of length at most N"`, in the object and in the summary. A loop target is marked unbound after the loop. Rejected: `return` or `break`/`continue` in the body, a name first bound inside the body, `for ... else`, iteration over a dict, and non-name targets. Tests: `src/pyprover/tests/test_container_loops.py`.
+- Tests: `src/pyprover/tests/test_try_none_isinstance.py`, `src/pyprover/tests/test_loop_translator.py`.
 
 - `simplify_function` / `verify_function_equivalence` model `list[T]` and `dict[K, V]` parameters (T, K, V in int, str, bool; K int or str), and list literals with one element sort. A container read is translated only where the solver proves it cannot fail: an index is in range, or a key is present, under the path condition. Negative indices follow Python. Conditional expressions and `and`/`or` are path-sensitive, so a guarded read is accepted and an unguarded one is rejected. Writes, aliasing, containers used as values, `in` on lists and `len()` of dicts are rejected. Tests: `src/pyprover/tests/test_containers.py`, including concrete checks of equivalence claims on empty and non-empty inputs.
 - `src/pyprover/tests/test_loop_translator.py`: real division, positive-divisor rule, and rejection of symbolic divisors in the loop translator.

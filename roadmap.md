@@ -887,3 +887,50 @@ Distinguished from genuinely-scoped, honestly-commented limitations that are *no
 ### 21.8 Test suite after this session's fixes
 
 No new test files added this pass (would be the natural next step for `borrow_checker.py`'s categorization logic specifically, which — like the rest of `rust_debug` before v2.9.4 — has no dedicated test file of its own; `test_phase_2_formal.py` only covers `phase_2_formal`, not `borrow_checker.py`). Full suite after all fixes above, with `z3-solver`/`hypothesis` installed (without them, `pyprover/tests/{test_ghost_state,test_quantifiers,test_z3_builtins}.py` fail to collect — an environment gap, not a code regression): 383 passed, 57 skipped, 1 deselected, 0 failed. `src/common/tests/test_pyprover_bridge.py` fails to *collect* (`ModuleNotFoundError: No module named 'common'` — an absolute-import assuming a different `sys.path`/rootdir setup than this suite's own `pytest.ini` uses) independent of anything touched this session; not investigated further this pass.
+
+## §22. Simplifier coverage: writes, zero division, free names, and the blocker list (2026-10-20, debug-skill branch contract-simplifier-fixes)
+
+### 22.1 What was built in this pass
+
+The `simplify_function` / `verify_function_equivalence` model in `src/pyprover/equivalence_verifier.py` now covers:
+
+- Containers: `list[T]` and `dict[K, V]` parameters, list literals (including `[]`), reads guarded by path-checked obligations, and loops over lists unrolled up to `max_unroll` with a domain note (§22.3 below).
+- `try`/`except` over index, key, None and zero-division failures, with a domain note for failures the handler does not catch.
+- `Optional[T]` parameters, `is None` tests, `isinstance` on the modelled types, `float` as exact reals (with a note), and `bool` inferred for unannotated parameters used as conditions (with a note).
+- Methods: reads and writes of scalar `self` fields. A method's final field state is part of an equivalence check.
+- `raise` (excluded from the domain with a note), `import` (names are opaque), and `range(a, n)` with a symbolic bound (unrolled with a note).
+- Division by a value that may be zero is rejected unless guarded or caught. The contract and loop translators refuse `/` by a non-literal.
+
+### 22.2 Soundness fixes made in this pass
+
+- Free names (module globals and unknown builtins) used to be read as unknown integers. A claim could then hold on a wrong model of that name. They are rejected now. Before the fix, those names were read as integers in 19 functions (`re`, `ast`) without any report. Now those functions are reported as unsupported for this reason.
+- `x % -2` was proven equal to `x % 2` by the contract translator. Only a positive literal divisor is translated now.
+- Field final states were looked up by the wrong key in the first version of the write support. Found by a test that compared two methods with different final states and got "equivalent".
+
+### 22.3 The batch
+
+`run_subset_batches.py` (kept in the scratch directory, not the repo) runs `simplify_function` over every function in the 85 non-test scripts in parallel batches of 10 on 4 workers. For each function it records the status, checks the translated Z3 expression against the source on a grid of inputs (for functions with at most three parameters and no containers), and checks any reported rewrite on the same grid. Methods are analysed inside their class.
+
+Last run: 727 functions. 3 simplified (`estimate_async_overhead`, `estimate_ffi_overhead` are term reorderings; `confidence_percent` is a method over optional and float fields, checked against its Python logic). 14 already minimal. 710 unsupported. No translation or simplification mismatches.
+
+### 22.4 Blockers, in order of frequency, and whether they can be lifted
+
+1. **Parameter annotations naming classes or open types the body reads** (`VerificationState`, `Dict[str, Any]`, `LanguageType`, `Path`, `ControlFlowGraph`, `CodeStructure`, `ast.expr`, …): about 100 functions. Not feasible without a model of each class. Enums (`LanguageType`, `OperationType`) are feasible as finite sorts if the enum is in the analysed code; not done.
+2. **Function ends without returning a value (None)**: about 16 `__init__` and setter methods. Out of scope: the model has no None return value.
+3. **List literals in expressions** (`Unsupported AST node: List`): about 12. Returning or passing a list is not modelled. Lists in assignments are modelled.
+4. **Expression statements** (calls for effect): about 11. Not feasible: calls have effects this model does not represent.
+5. **`for x in ...` over non-range iterables**: about 10. Not feasible for iterables of unknown type; loops over container parameters are modelled.
+6. **`None` tests on non-names** (`x.attr is None`, `f(x) is None`): about 10. Not feasible without call and attribute models.
+7. **Global names** (`re`, `ast`, module constants): about 19. Correctly rejected (§22.2). Lifting this needs the module's values, which the batch does not pass.
+8. **Fields typed by unknown values** (`self.state`, `self.report`, `self.results`, …): about 30. Feasible only with an annotation on the field or a parameter it is assigned from. Most of these are assigned from calls.
+9. **Field annotations naming classes or open types** (`List[DetectedPattern]`, `Dict[str, List[str]]`, …): about 40. Not feasible without class models.
+10. **f-strings** (`JoinedStr`): about 7. Not feasible: string formatting over unknown values.
+11. **`self` passed as a value**: about 7. Not feasible: the object would escape to code the model cannot see.
+12. **Nested class definitions, `class` attributes of unknown type, and empty-list fields**: about 20. Not feasible in general.
+13. **Calls** (`Unsupported call: Attribute ...`): about 15. Not feasible without call semantics.
+
+The top blockers are therefore dominated by annotations naming classes and by calls. Feasible next steps, each of which would lift a small number of functions: enum parameters (item 1, partial), and fields whose annotation is a scalar type (item 8, partial).
+
+### 22.5 Test suite
+
+New tests: `test_containers.py`, `test_container_loops.py`, `test_try_none_isinstance.py`, `test_floats_and_zero.py`, `test_object_fields.py`, `test_blockers_round.py`. Each construct is checked against Python on concrete inputs where the construct can be evaluated concretely. The full suite passes: 1195 tests, with the environment's `hypothesis` installed (the property-tester tests were failing only because it was missing).

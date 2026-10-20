@@ -117,7 +117,12 @@ class LoopVerificationReport:
 # ---------------------------------------------------------------------------
 
 # Patterns: match  # Invariant: expr   //Invariant: expr   /* Inv: expr */
-from .contract_verifier import _DECORATOR_CONTRACT_RE, _STRING_PIECE_RE, _as_real, _is_real
+from .contract_verifier import (
+    _DECORATOR_CONTRACT_RE,
+    _STRING_PIECE_RE,
+    MODEL_QUANTIFIERS,
+    _expr_to_z3,
+)
 
 _INVARIANT_RE = re.compile(
     r"(?:#|//|/\*)\s*[Ii]nv(?:ariant)?:\s*(.*?)(?:\*/)?$"
@@ -148,129 +153,9 @@ def extract_loop_invariants(source_code: str) -> List[LoopInvariant]:
 # Simple Z3 expression parser for arithmetic invariants
 # ---------------------------------------------------------------------------
 
-_OP_MAP = {
-    ast.Add:    lambda a, b: a + b,
-    ast.Sub:    lambda a, b: a - b,
-    ast.Mult:   lambda a, b: a * b,
-    ast.FloorDiv: lambda a, b: a / b,
-    ast.Div:    lambda a, b: a / b,
-    ast.Mod:    lambda a, b: a % b,
-    ast.Lt:     lambda a, b: a < b,
-    ast.LtE:    lambda a, b: a <= b,
-    ast.Gt:     lambda a, b: a > b,
-    ast.GtE:    lambda a, b: a >= b,
-    ast.Eq:     lambda a, b: a == b,
-    ast.NotEq:  lambda a, b: a != b,
-    ast.And:    lambda a, b: z3.And(a, b),
-    ast.Or:     lambda a, b: z3.Or(a, b),
-    ast.Not:    lambda a: z3.Not(a),
-}
-
-
-def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
-    """Recursively convert an ast.expr into a Z3 expression."""
-    if isinstance(node, ast.Constant):
-        if isinstance(node.value, str):
-            return z3.StringVal(node.value)
-        return node.value
-    if isinstance(node, ast.Name):
-        name = node.id
-        if name in env:
-            return env[name]
-        # Create a fresh Int variable on demand
-        v = z3.Int(name)
-        env[name] = v
-        return v
-    if isinstance(node, ast.BinOp):
-        left = _expr_to_z3(node.left, env)
-        right = _expr_to_z3(node.right, env)
-        if isinstance(node.op, ast.Div):
-            # Python's / is real division; Z3's Int / is integer division.
-            return _as_real(left) / _as_real(right)
-        if isinstance(node.op, (ast.FloorDiv, ast.Mod)):
-            # Z3's div/mod are Euclidean and differ from Python for negative or
-            # symbolic divisors (Python 7 % -2 == -1, Z3 mod(7, -2) == 1).
-            if not (isinstance(node.right, ast.Constant) and type(node.right.value) is int
-                    and node.right.value > 0):
-                raise NotImplementedError(
-                    "'//' and '%' are only supported with a positive integer literal divisor"
-                )
-            if _is_real(left):
-                raise NotImplementedError("floor division and modulo are not defined over reals")
-        op = _OP_MAP.get(type(node.op))
-        if op is None:
-            raise NotImplementedError(f"Unsupported BinOp: {type(node.op).__name__}")
-        return op(left, right)
-    if isinstance(node, ast.BoolOp):
-        values = [_expr_to_z3(v, env) for v in node.values]
-        if isinstance(node.op, ast.And):
-            return z3.And(*values)
-        return z3.Or(*values)
-    if isinstance(node, ast.UnaryOp):
-        operand = _expr_to_z3(node.operand, env)
-        if isinstance(node.op, ast.Not):
-            return z3.Not(operand)
-        if isinstance(node.op, ast.USub):
-            return -operand
-        raise NotImplementedError(f"Unsupported UnaryOp: {type(node.op).__name__}")
-    if isinstance(node, ast.Compare):
-        left = _expr_to_z3(node.left, env)
-        result = None
-        for op, comparator in zip(node.ops, node.comparators):
-            right = _expr_to_z3(comparator, env)
-            cmp = _OP_MAP.get(type(op))
-            if cmp is None:
-                raise NotImplementedError(f"Unsupported Compare op: {type(op).__name__}")
-            part = cmp(left, right)
-            result = part if result is None else z3.And(result, part)
-            left = right
-        return result
-    if isinstance(node, ast.Call):
-        if (isinstance(node.func, ast.Name) and node.func.id in ("all", "any")
-                and len(node.args) == 1 and isinstance(node.args[0], ast.GeneratorExp)):
-            return _quantifier_to_z3(node.func.id, node.args[0], env)
-        result = z3_builtins.try_call_to_z3(node, env, _expr_to_z3)
-        if result is not None:
-            return result
-        raise NotImplementedError(f"Unsupported call: {ast.dump(node.func)}")
-    raise NotImplementedError(f"Unsupported node type: {type(node).__name__}")
-
-
-def _quantifier_to_z3(kind: str, gen: ast.GeneratorExp, env: Dict[str, Any]) -> Any:
-    """Translate ``all(c for k in range(lo, hi))`` to ForAll, ``any(...)`` to Exists.
-
-    The bound variable is local to the quantifier. Bounds may use loop variables,
-    so a quantified invariant such as ``all(k < i for k in range(0, i))`` is checked
-    in INIT and PRESERVATION like any other invariant.
-    """
-    if len(gen.generators) != 1 or not isinstance(gen.generators[0].target, ast.Name):
-        raise NotImplementedError("quantifier needs exactly one loop variable")
-    comp = gen.generators[0]
-    if comp.ifs or comp.is_async:
-        raise NotImplementedError("quantifier filters are not supported")
-    rng = comp.iter
-    if not (isinstance(rng, ast.Call) and isinstance(rng.func, ast.Name) and rng.func.id == "range"):
-        raise NotImplementedError("quantifier domain must be range(...)")
-    if len(rng.args) == 1:
-        lo_node, hi_node = ast.Constant(value=0), rng.args[0]
-    elif len(rng.args) == 2:
-        lo_node, hi_node = rng.args
-    else:
-        raise NotImplementedError("range() takes one or two arguments in a quantifier")
-    lo = _expr_to_z3(lo_node, env)
-    hi = _expr_to_z3(hi_node, env)
-    var = z3.Int(comp.target.id)
-    inner = dict(env)
-    inner[comp.target.id] = var
-    body = _expr_to_z3(gen.elt, inner)
-    in_range = z3.And(lo <= var, var < hi)
-    if kind == "all":
-        return z3.ForAll([var], z3.Implies(in_range, body))
-    return z3.Exists([var], z3.And(in_range, body))
-
-
 def _parse_invariant_expr(expr_str: str, env: Dict[str, Any]) -> Any:
     """Parse an invariant expression string into a Z3 expression."""
+    env[MODEL_QUANTIFIERS] = True  # invariants may quantify over range(); see contract_verifier
     tree = ast.parse(expr_str, mode="eval")
     return _expr_to_z3(tree.body, env)
 
@@ -315,6 +200,7 @@ def verify_loop_invariant(
 
     # Build initial symbolic environment from parameter names
     env: Dict[str, Any] = {name: z3.Int(name) for name in param_names}
+    env[MODEL_QUANTIFIERS] = True  # all()/any() over range() become ForAll/Exists here
     z3_builtins.seed_string_env([invariant.expression], env)
 
     # ------------------------------------------------------------------
