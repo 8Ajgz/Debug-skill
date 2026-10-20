@@ -10,7 +10,7 @@
 
 ## Current state (read this first)
 
-**Last updated:** 2026-10-19, after the design-review error fix on `main`. Everything in the sections below this one is history, and some of it is out of date. Where they disagree, this section and the three docs it names win.
+**Last updated:** 2026-10-20, after the PyProver result-soundness series (see the first `Done since 2.9.6` entry). Earlier: 2026-10-19, after the design-review error fix on `main`. Everything in the sections below this one is history, and some of it is out of date. Where they disagree, this section and the three docs it names win.
 
 **Read in this order:**
 1. `docs/FEATURE_AUDIT.md`: status of every old feature (incorporated, partial, superseded, not incorporated, never built, unverifiable), with the file that holds each one, and the open items in priority order.
@@ -25,6 +25,7 @@
 **How to verify:** `python -m pytest -q -p no:cacheprovider` from the repo root. Plain `pytest` works (`pytest.ini` sets the import path). Last run: 916 passed, 58 skipped, 1 deselected (2026-10-19, this sandbox). Skips are optional tools (semgrep, bandit, clang, cppcheck, valgrind, CBMC, KLEE, angr) and the Node and Rust tests when `node` or `rustc` is missing. The earlier count of 934 passed, 22 skipped came from a fuller environment. The JS and Rust property tests need `node` and `rustc`. Hypothesis is optional for Python property tests.
 
 **Done since 2.9.6** (details in CHANGELOG `[Unreleased]`):
+- PyProver result soundness (6 commits, 2026-10-20): a postcondition on `result` is now checked against the body, not only for satisfiability. Before, `Post: result < 0` for `return x * 2` with `Pre: x >= 0` reported VERIFIED, and so did code with no annotations. Now: the inliner (`contract_verifier.py`) handles assignments, `if`/`else` and constant `range()` loops; `src/pyprover/loop_vc.py` handles `while` loops, `for` over arrays or symbolic ranges (with `# Invariant:`), array and attribute writes, call statements (which havoc arrays, fields and globals), returns inside loops, and paths that fall off the end. Writes to two or more arrays or objects are checked under every aliasing grouping (up to four parameters). Anything not proven is INCONCLUSIVE, never a pass; a model counterexample is downgraded to unproven rather than reported as a failure. Regression tests: `src/pyprover/tests/test_result_soundness.py`, `test_loop_vc.py`.
 - PyProver: SHA256 cache, parallel batch verification (worker processes, not threads, because Z3 is not thread-safe), SMT-LIB export via `to_smt2()`, Hypothesis property tests (Python), invariant templates (6 of the 8 v8.2 ones), conditional postconditions (`if cond: clause`), float precision (Z3 Real, real division), decorator contracts (`@requires`, `@ensures`, `@loop_invariant`), quantified loop invariants (`all`/`any` over `range` as ForAll/Exists), and property testing for JavaScript (node) and Rust (rustc).
 - Loop verifier: INIT is checked as validity at the entry values read from the source. It was satisfiability before, which reported `i >= 0` as verified with i starting at -1. Unknown entry or no iteration variable gives `None`, not `True`.
 - Master debugger: `verify_fix()` (bug reproduced on the original, fix passes on the new code), for Python, JS and Rust. It is a function the caller invokes, not an automatic step in `debug()`.
@@ -40,6 +41,8 @@
 - Pytest: `pythonpath = src .` in `pytest.ini`. Version strings agree at 2.9.6 in SKILL.md, INTEROP.yaml, MANIFEST.txt, openapi.yaml, API.md, README and `src/__init__.py`.
 
 **Decisions and why** (do not reopen without new evidence):
+- Unproven is never a pass. Any path the model cannot judge (unsupported statement, no invariant, invariant not inductive, bare array or object used as a value, a path that may fall off the end) gives `verified: false` with `inconclusive: true`. A counterexample from the loop model is downgraded to unproven, because havoc and index bounds can produce states no real run reaches.
+- Loop invariants are `# Invariant:` comments directly above the loop. Each proof obligation may use only the premises established before it, so a loop's exit fact cannot justify its own invariant.
 - Z3 runs in worker processes, not threads (thread-unsafe global context).
 - Floats are Z3 Real. Python `/` is real division. `//` and `%` are skipped over reals, since their semantics differ.
 - Invariant templates are checked by running reference loops, not proved. Z3 does not model subscripts, `len` or `sum`. RECURSION (its `base OR step` form is not an invariant) and WHILE_LOOP (its bound is a guess) were dropped.
