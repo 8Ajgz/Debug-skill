@@ -986,3 +986,40 @@ Two assumptions are recorded where they apply rather than hidden. An object para
 ### 23.5 Test suite
 
 Full suite after the change: 1226 passed, 58 skipped, 1 deselected (§22.5 reported 1195 passed; the 31 new tests account for the difference).
+
+## §24. Records: dataclasses returned by a constructor call (2026-10-20)
+
+### 24.1 What was built
+
+A function that returns a dataclass built by a constructor call is now compared with another such function, field by field. Before, the constructor was an unsupported call.
+
+- **Which classes.** A class with `@dataclass` (or `@dataclass(...)` without `eq=False`), no base class, and no `__post_init__`. A plain class compares by identity, so it is not a record. A dataclass with `eq=False` is not compared by its fields either.
+- **Fields.** The declared fields, each a scalar (int, bool, float, str) or an enum. A container, object, or `field(default_factory=...)` field makes the record unsupported, because records hold no containers.
+- **Construction.** With no `__init__`, the declared fields are the parameters in order, and keywords name them. A field with a literal default, or an enum member default, may be left out. With its own `__init__`, the body runs on a fresh object, and the fields it sets are the record. A field it does not set takes its class default. The `__init__` may not read a field, since reading a field before it is set has no value the model can give.
+- **Use.** A record is returned directly, or bound to a name with each field as `name.field`, and read field by field. Records join across an `if` when both branches build one of the same class. A record is never a value inside an expression. A constructor call used as a value fails with a reason.
+- **Comparison.** Two records are equal when every field is equal. Enum fields compare by member identity. Records of different classes are never compared, and a function that returns a record on one side only is unsupported.
+- **Simplification.** `simplify_function` reports a record-valued function as unsupported. A record has no single simplified expression.
+
+Enum values gained two forms as a side effect: a conditional between two members (`Level.HIGH if x > 0 else Level.LOW`), and an assignment of a member to a field.
+
+### 24.2 Census
+
+Over the same 83 files, the record change moves no function's status. Simplified 3, already minimal 9, unsupported 666 before and after, no crashes. The "object used as a value" group falls from 17 to 7, and the 7 are containers and `self`. The constructor cases now stop at:
+
+| Blocker | Count |
+|---|---|
+| `field()` option such as `default_factory`, so a container field | 6 |
+| Plain class, compared by identity | 2 |
+| Constructor used inside an expression, such as `Cls(...).method()` | 2 |
+
+Those 10 are the designed limits, not gaps. Records of containers would need a container equality model, which is the next item of §23.3 (comprehensions and string joins).
+
+### 24.3 Assumptions and limits
+
+- A record's equality is the equality of its declared fields, which is Python's `==` for a dataclass with `eq` enabled. A dataclass that defines its own `__eq__`, or sets `eq=False`, is not compared, since either replaces that equality.
+- A record is compared only with a record of the same class, from the same scope. Two functions that construct the same class from two code strings are reported as different classes (§23.4 applies).
+- Records are returned and read; they are not mutated after construction.
+
+### 24.4 Test suite
+
+`src/pyprover/tests/test_records.py` (20 tests). Each claimed equivalence is also checked with Python's own `==` on the same inputs. Full pyprover suite: 840 passed.
