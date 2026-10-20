@@ -1023,3 +1023,74 @@ Those 10 are the designed limits, not gaps. Records of containers would need a c
 ### 24.4 Test suite
 
 `src/pyprover/tests/test_records.py` (20 tests). Each claimed equivalence is also checked with Python's own `==` on the same inputs. Full pyprover suite: 840 passed.
+
+## §25. Blocker chunks: opaque values, literals, loops, module flags, static methods, isinstance (2026-10-20)
+
+### 25.1 What was built
+
+Each item is a rule the model applies soundly. The branches are `any-values`, `list-literals`, `loop-literals`, `opaque-types`, `dict-literals`, and `chunks-2-4-7-8`, merged into `main` together.
+
+- **Opaque values (§22.4 item 1, unmodelled annotations).** A parameter or field of a type the model does not know is an opaque value, not a rejection at its annotation. The uses modelled are passing it on unchanged, a `None` test, `len`, and a loop over a list of such values. Every other use is rejected where it occurs. A non-`Optional` type is never `None`. An `Optional` of an unknown type, and `Any`, may be `None`. Opaque lists are read by index only in a loop, and each element is a value named for its index.
+- **Any.** `Any` is an opaque value that may be `None`. `List[Any]` and `Dict[str, Any]` are containers whose length and key membership are modelled.
+- **List and dict literals.** A list literal bound by an annotated assignment, and a dict literal bound by any assignment, is a container. A dict has int or str keys and scalar values of one sort. A repeated key keeps its last value. Mixed sorts and `**` unpacking are rejected.
+- **Loops.** A loop over a tuple or list literal unrolls over its elements, evaluated once before the loop as Python does. `enumerate` over a list, and a loop over a list field of an object, unroll over the list the model knows, and the list's length bounds them.
+- **Module flags.** A module name bound only to `True` or `False` is one unknown Boolean, shared by every use. A name also bound by a def, class, import, loop, or `global` statement is not a flag.
+- **Static methods and keywords.** A `@staticmethod` is inlined with no `self`, through an object or through the class name. Keyword arguments bind by name in inlined calls.
+- **`isinstance` of opaque values.** Each test is one Boolean per value and type, so repeated tests agree, and `None` is an instance only of `object`.
+
+### 25.2 A design change
+
+§23.3 and the chunk list in the conversation proposed unrolling a loop over any iterable, with a symbolic length and a domain note. That is unsound, and it was not built. A loop over a call result, such as `text.splitlines()` or `d.items()`, can raise, and the loop model would not show it. A claim could then hold for inputs where Python gives no result. Loops are unrolled only over lists the model knows.
+
+The `isinstance` rule has the same kind of hazard. The type tests of an opaque value are independent unknowns, so a counterexample can assign types that no value has together. A counterexample that depends on one is reported as unsupported, not as a disproof.
+
+### 25.3 Census
+
+Latest census on `chunks-2-4-7-8`: 707 functions across the 83 non-test files. This count includes the simplifier's own helper functions. It was 680 unsupported before these chunks.
+
+| Status | Functions |
+|---|---|
+| Simplified | 4 |
+| Already minimal | 19 |
+| Unsupported | 684 |
+| Crashes | 0 |
+
+The 4 simplified results are not real simplifications. Two are reorderings, `estimate_async_overhead` and `estimate_ffi_overhead`, which the size check counts as smaller. One is a branch swap in `confidence_percent`. One is the `min` encoding in `complexity_score`. Fixing the size metric would leave one of them.
+
+Before these chunks, the blockers were 149 module-flag names, 46 non-range loops, and 37 `isinstance` blockers. Now they are 134 free names (not flags), 39 non-range loops, and 14 `isinstance` blockers. The earlier numbers are from a different census, so they are not comparable one to one.
+
+### 25.4 Remaining blockers
+
+| Blocker | Functions | Status |
+|---|---|---|
+| Free name: library, builtin, or global | 134 | Mostly not feasible. `set`, `sum`, and `any` over modelled lists are the only small parts |
+| Self field assigned from an unknown-typed value | 102 | Medium–hard. Infer the kind from the return annotation of the project function assigned |
+| Opaque value used beyond its modelled uses | 82 | Not feasible without type-specific models |
+| Other (mixed) | 63 | Includes about 12 enum cases (members and conditionals used as values) and 9 imported-module names |
+| Container or object used as a value | 40 | Needs container or record results |
+| Loop over a non-range, non-list iterable | 39 | Not feasible soundly (see §25.2) |
+| Expression statement (call for effect) | 31 | Not feasible |
+| Self field with no modelled type | 31 | Mostly inherited from base classes outside the repo |
+| None compared with a non-name | 21 | Solvable for call results with a modelled type |
+| Class attribute not a literal | 16 | Not feasible |
+| Function can end without a return | 14 | Needs a `None` result |
+| `isinstance` on a type outside the scalar set | 14 | Partly solvable |
+| Call to a built-in or library method | 13 | Not feasible |
+| Dataclass field options (`default_factory`) | 12 | Container fields; not feasible |
+| f-string | 9 | Solvable for string constants and `str` parameters |
+| None as a value | 9 | Solvable in assignments |
+| Dataclass or record not modelled | 8 | Not feasible |
+| Optional value used without a guard | 7 | Needs path-sensitive narrowing |
+| `global` statement | 7 | Not feasible |
+| List literal not in an assignment | 6 | Solvable |
+| Sort mismatch on an unannotated parameter | 6 | Fix parameter type inference |
+| `with` statement | 6 | Not feasible |
+| `except` handler form | 5 | Solvable for simple forms |
+| Constructor call inside an expression | 4 | Not feasible |
+| Loop target shape not modelled | 2 | Not feasible |
+| Dict literal not in an assignment | 2 | Solvable |
+| `while` loop | 1 | Solvable with the invariant machinery in `loop_vc.py` |
+
+### 25.5 Tests
+
+The new test files are `test_any_values.py`, `test_list_literals.py`, `test_loop_forms.py`, `test_opaque_types.py`, `test_dict_literals.py`, and `test_chunks_2_4_7_8.py`. Each claimed equivalence is checked against Python on the same inputs, and each rejection checks its reason. The full repo suite passes: 1299 passed, 58 skipped, 1 deselected.

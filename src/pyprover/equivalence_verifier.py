@@ -86,7 +86,7 @@ except ImportError:
     Z3_AVAILABLE = False
 
 from .contract_verifier import _expr_to_z3, _OP_MAP, _as_real
-from .project_index import base_name as _name_of, subclass_members as _subclass_members
+from .project_index import base_name as _name_of, module_bool_flags, subclass_members as _subclass_members
 
 _Z3_TIMEOUT_MS = 5000
 DEFAULT_MAX_UNROLL = 64
@@ -185,6 +185,8 @@ _WRITES_NOTE = "only the returned value is simplified; field writes are not part
 _RAISE_NOTE = "inputs that reach a raise statement are excluded"
 _RANGE_NOTE = "loops over range(n) are exact for n at most the unroll bound"
 _ENUM_NOTE = "an enum value is shown as the index of its member"
+_TYPE_TEST_NOTE = ("a test of an opaque value's type is an unknown truth value, which is not related "
+                   "to the tests of other types, so a counterexample that depends on one is not reported")
 _CLOSED_NOTE = ("a class's methods and fields are taken to be its own, since no subclass is in the "
                 "analysed code; pass a ProjectScope to check the repository")
 
@@ -221,12 +223,22 @@ _UNBOUND = _Unbound()
 class _Seq:
     length: Any  # Z3 Int
     items: Any   # Z3 Array(Int, Int)
+    opaque: bool = False  # elements are Any values: the array is a placeholder, never read
 
 
 @dataclass(frozen=True)
 class _Map:
     present: Any  # Z3 Array(Int, Bool)
     values: Any   # Z3 Array(Int, Int)
+    opaque: bool = False  # values are Any values: the array is a placeholder, never read
+
+
+@dataclass(frozen=True)
+class _AnyValue:
+    """A value of type Any: an arbitrary Python object, of which nothing is known. It can be
+    passed on unchanged, and tested against None (through the _Opt that holds it). Any
+    other use of it, such as an attribute, an operator, or equality, is not modelled."""
+    name: str
 
 
 @dataclass(frozen=True)
@@ -260,6 +272,10 @@ class _LocalScope:
         self._classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
         self._functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
         self._all_classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+        self._flags = module_bool_flags(tree)
+
+    def is_module_flag(self, name: str) -> bool:
+        return name in self._flags
 
     def class_def(self, name: str) -> Optional[ast.ClassDef]:
         return self._classes.get(name)
@@ -325,6 +341,12 @@ _DEFAULTS = {"int": lambda: z3.IntVal(0), "str": lambda: z3.StringVal(""), "floa
              "bool": lambda: z3.BoolVal(False)}
 
 
+def _is_any_annotation(node: ast.expr) -> bool:
+    """`Any`, or `typing.Any`."""
+    return (isinstance(node, ast.Name) and node.id == "Any") or (
+        isinstance(node, ast.Attribute) and node.attr == "Any")
+
+
 def _sort_name(node: ast.expr) -> Optional[str]:
     return node.id if isinstance(node, ast.Name) and node.id in _SORTS else None
 
@@ -348,13 +370,19 @@ def _param_kind(arg: ast.arg, body: Optional[List[ast.stmt]] = None, scope: Any 
     ann = arg.annotation
     if isinstance(ann, ast.Name) and ann.id in ("int", "str", "float"):
         return ann.id
+    if _is_any_annotation(ann):
+        # An Any value is opaque, so a parameter the body never reads cannot change the result.
+        return "any" if body is None or _reads_name(body, arg.arg) else "unused"
     if isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name):
         base, sl = ann.value.id, ann.slice
-        if base in ("list", "List") and _sort_name(sl):
-            return ("list", _sort_name(sl))
+        if base in ("list", "List") and (_sort_name(sl) or _is_any_annotation(sl)):
+            return ("list", _sort_name(sl) or "any")
         if (base in ("dict", "Dict") and isinstance(sl, ast.Tuple) and len(sl.elts) == 2
-                and _sort_name(sl.elts[0]) in ("int", "str") and _sort_name(sl.elts[1])):
-            return ("dict", _sort_name(sl.elts[0]), _sort_name(sl.elts[1]))
+                and _sort_name(sl.elts[0]) in ("int", "str")
+                and (_sort_name(sl.elts[1]) or _is_any_annotation(sl.elts[1]))):
+            return ("dict", _sort_name(sl.elts[0]), _sort_name(sl.elts[1]) or "any")
+        if base == "Optional" and _is_any_annotation(sl):
+            return "any"
         if base == "Optional" and _sort_name(sl) in ("int", "str", "bool", "float"):
             return ("opt", _sort_name(sl))
     if (isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr)):
@@ -368,8 +396,25 @@ def _param_kind(arg: ast.arg, body: Optional[List[ast.stmt]] = None, scope: Any 
         return ("enum", named) if _enum_members(named) is not None else ("obj", named)
     if body is not None and not _reads_name(body, arg.arg):
         return "unused"
-    raise UnsupportedConstructError(
-        f"parameter '{arg.arg}' has an annotation that is not modelled: {ast.unparse(ann)}")
+    return _opaque_kind(ann)
+
+
+def _opaque_kind(ann: ast.expr) -> Any:
+    """The kind of a value whose type is not modelled. Such a value is opaque: the model
+    knows nothing about it, and every use that depends on what it is, such as an attribute,
+    an operator, or equality, is rejected where it occurs. So a value of an unmodelled type
+    is modelled soundly as an Any value, with two differences: a non-Optional type is never
+    None, and a container of unmodelled elements is a list or dict of Any values."""
+    if isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name):
+        base, sl = ann.value.id, ann.slice
+        if base in ("list", "List"):
+            return ("list", "any")
+        if base in ("dict", "Dict") and isinstance(sl, ast.Tuple) and len(sl.elts) == 2 \
+                and _sort_name(sl.elts[0]) in ("int", "str"):
+            return ("dict", _sort_name(sl.elts[0]), "any")
+        if base == "Optional":
+            return "any"  # may be None, as Any may
+    return "opaque"
 
 
 def _used_as_condition(body: List[ast.stmt], name: str) -> bool:
@@ -396,6 +441,12 @@ def _reads_name(body: List[ast.stmt], name: str) -> bool:
                for n in ast.walk(ast.Module(body=list(body), type_ignores=[])))
 
 
+def _element_sort(name: str) -> Any:
+    """The Z3 sort of container elements. An Any element has a placeholder sort, which no
+    read uses (reads of an opaque container are rejected)."""
+    return z3.IntSort() if name == "any" else _SORTS[name]()
+
+
 def _make_param(kind: Any, name: str, facts: Optional[List[Any]] = None, scope: Any = None) -> Any:
     """The symbolic value of a parameter of this kind. An enum or an object needs
     `facts` (its domain is recorded there) and, for an object, the `scope` its class
@@ -411,6 +462,12 @@ def _make_param(kind: Any, name: str, facts: Optional[List[Any]] = None, scope: 
         return _class_object(kind[1], f"{name}.", scope, facts)
     if kind == "unused":
         return z3.Int(name)  # never read, so its value does not matter
+    if kind == "any":
+        # Any may be None, so the value is an _Opt whose None flag is a Z3 Bool.
+        return _Opt(z3.Bool(name + "__none"), _AnyValue(name + "__val"))
+    if kind == "opaque":
+        # A value of an unmodelled, non-Optional type: never None.
+        return _Opt(z3.BoolVal(False), _AnyValue(name + "__val"))
     if kind == "bool":
         return z3.Bool(name)
     if kind == "str":
@@ -421,11 +478,13 @@ def _make_param(kind: Any, name: str, facts: Optional[List[Any]] = None, scope: 
         return _Opt(z3.Bool(name + "__none"), _make_param(kind[1], name + "__val"))
     if isinstance(kind, tuple) and kind[0] == "list":
         return _Seq(z3.Int(name + "__len"),
-                    z3.Array(name + "__items", z3.IntSort(), _SORTS[kind[1]]()))
+                    z3.Array(name + "__items", z3.IntSort(), _element_sort(kind[1])),
+                    opaque=kind[1] == "any")
     if isinstance(kind, tuple) and kind[0] == "dict":
-        key, val = _SORTS[kind[1]](), _SORTS[kind[2]]()
+        key, val = _SORTS[kind[1]](), _element_sort(kind[2])
         return _Map(z3.Array(name + "__present", key, z3.BoolSort()),
-                    z3.Array(name + "__values", key, val))
+                    z3.Array(name + "__values", key, val),
+                    opaque=kind[2] == "any")
     return z3.Int(name)
 
 
@@ -466,12 +525,16 @@ def _merge_envs(cond: Any, then_env: Dict[str, Any], else_env: Dict[str, Any],
             merged[name] = _UNBOUND
         elif isinstance(tv, _Opaque) or isinstance(ev, _Opaque):
             merged[name] = _OPAQUE
+        elif isinstance(tv, _Opt) and isinstance(ev, _Opt) and isinstance(tv.value, _AnyValue):
+            if tv.value != ev.value:
+                raise UnsupportedConstructError(f"'{name}' is an Any value that the two branches bind differently")
+            merged[name] = _Opt(z3.If(cond, tv.isnone, ev.isnone), tv.value)
         elif isinstance(tv, _Opt) and isinstance(ev, _Opt):
             merged[name] = _Opt(z3.If(cond, tv.isnone, ev.isnone), z3.If(cond, tv.value, ev.value))
-        elif isinstance(tv, _Seq) and isinstance(ev, _Seq):
-            merged[name] = _Seq(z3.If(cond, tv.length, ev.length), z3.If(cond, tv.items, ev.items))
-        elif isinstance(tv, _Map) and isinstance(ev, _Map):
-            merged[name] = _Map(z3.If(cond, tv.present, ev.present), z3.If(cond, tv.values, ev.values))
+        elif isinstance(tv, _Seq) and isinstance(ev, _Seq) and tv.opaque == ev.opaque:
+            merged[name] = _Seq(z3.If(cond, tv.length, ev.length), z3.If(cond, tv.items, ev.items), tv.opaque)
+        elif isinstance(tv, _Map) and isinstance(ev, _Map) and tv.opaque == ev.opaque:
+            merged[name] = _Map(z3.If(cond, tv.present, ev.present), z3.If(cond, tv.values, ev.values), tv.opaque)
         elif isinstance(tv, _Enum) and isinstance(ev, _Enum) and tv.classdef is ev.classdef:
             merged[name] = _Enum(tv.classdef, z3.If(cond, tv.term, ev.term))
         elif isinstance(tv, _Record) and isinstance(ev, _Record) and tv.classdef is ev.classdef:
@@ -484,16 +547,38 @@ def _merge_envs(cond: Any, then_env: Dict[str, Any], else_env: Dict[str, Any],
     return merged
 
 
+def _list_source(node: ast.expr, env: Dict[str, Any]) -> Optional[Tuple["_Seq", str]]:
+    """The list an iterable names, with the name its elements are keyed by, or None.
+
+    A list-valued name, or a list field of an object (bound on first use, as a field read
+    binds it). Anything else, such as a call that returns a list, is not a list the model
+    knows: iterating it could raise, which the loop model would not show."""
+    if isinstance(node, ast.Name):
+        value = env.get(node.id)
+        return (value, node.id) if isinstance(value, _Seq) else None
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        obj = env.get(node.value.id)
+        kind = obj.fields.get(node.attr) if isinstance(obj, _ObjRef) else None
+        if isinstance(kind, tuple) and kind[0] == "list" and node.attr not in obj.methods:
+            key = f"{obj.prefix}{node.attr}"
+            if key not in env:
+                env[key] = obj.value(node.attr)
+            return (env[key], key)
+    return None
+
+
 def _is_container_loop(stmt: ast.For, env: Dict[str, Any]) -> bool:
-    """`for x in xs` or `for i in range(len(xs))` where xs is a container parameter/literal."""
+    """`for x in xs`, `for i, x in enumerate(xs)` or `for i in range(len(xs))` where xs is a
+    list parameter, literal, or list field of an object."""
     it = stmt.iter
-    if isinstance(it, ast.Name):
-        return isinstance(env.get(it.id), _Seq)
+    if isinstance(it, (ast.Name, ast.Attribute)):
+        return _list_source(it, env) is not None
+    if _is_enumerate(it):
+        return _list_source(it.args[0], env) is not None
     return (isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range"
             and len(it.args) == 1 and isinstance(it.args[0], ast.Call)
             and isinstance(it.args[0].func, ast.Name) and it.args[0].func.id == "len"
-            and len(it.args[0].args) == 1 and isinstance(it.args[0].args[0], ast.Name)
-            and isinstance(env.get(it.args[0].args[0].id), _Seq))
+            and len(it.args[0].args) == 1 and _list_source(it.args[0].args[0], env) is not None)
 
 
 def _is_symbolic_range(stmt: ast.For) -> bool:
@@ -548,6 +633,22 @@ def _unroll_symbolic_range(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
     return current
 
 
+def _is_enumerate(node: ast.expr) -> bool:
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "enumerate"
+            and len(node.args) == 1 and not node.keywords)
+
+
+def _loop_names(stmt: ast.For, indexed: bool) -> List[str]:
+    """The names a loop binds: one name, or the (index, element) pair of an enumerate."""
+    if not indexed and isinstance(stmt.target, ast.Name):
+        return [stmt.target.id]
+    if indexed and isinstance(stmt.target, ast.Tuple) and len(stmt.target.elts) == 2 and all(
+            isinstance(e, ast.Name) for e in stmt.target.elts):
+        return [e.id for e in stmt.target.elts]
+    raise UnsupportedConstructError(
+        "loop variable must be a simple name, or an (index, element) pair for enumerate")
+
+
 def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) -> Dict[str, Any]:
     """Unroll a loop over a container whose length is symbolic.
 
@@ -555,19 +656,25 @@ def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
     every list of length at most `max_unroll`. Longer lists are not covered, and
     the loop records the fact `length <= max_unroll` so every claim that uses this
     loop is stated for that domain only.
+
+    The loop takes `x in xs` (the element), `i in range(len(xs))` (the index), or
+    `i, x in enumerate(xs)` (both).
     """
-    if not isinstance(stmt.target, ast.Name):
-        raise UnsupportedConstructError("loop variable must be a simple name")
     if stmt.orelse:
         raise UnsupportedConstructError("for ... else is not supported")
-    target = stmt.target.id
-    target_was_bound = target in env and not isinstance(env[target], _Unbound)
-    if isinstance(stmt.iter, ast.Name):
-        seq = env[stmt.iter.id]
-        element = True   # the target takes seq.items[k]
+    if _is_enumerate(stmt.iter):
+        seq, list_name = _list_source(stmt.iter.args[0], env) or (None, None)
+        if seq is None:
+            raise UnsupportedConstructError("enumerate is only modelled over a list parameter, literal or field")
+        indexed, element = True, True
+    elif isinstance(stmt.iter, (ast.Name, ast.Attribute)):
+        seq, list_name = _list_source(stmt.iter, env)
+        indexed, element = False, True  # the target takes seq.items[k]
     else:
-        seq = env[stmt.iter.args[0].args[0].id]
-        element = False  # the target takes the index k
+        seq, list_name = _list_source(stmt.iter.args[0].args[0], env)
+        indexed, element = False, False  # the target takes the index k, which uses the length alone
+    names = _loop_names(stmt, indexed)
+    bound_before = {n: n in env and not isinstance(env[n], _Unbound) for n in names}
 
     facts = env.setdefault(_FACTS_KEY, [])
     facts.append(seq.length <= max_unroll)
@@ -578,21 +685,71 @@ def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
         guard = seq.length > k
         iter_env = dict(current)
         iter_env[_PATH_KEY] = z3.And(_path_of(current), guard)
-        iter_env[target] = z3.Select(seq.items, z3.IntVal(k)) if element else z3.IntVal(k)
+        if seq.opaque:
+            # An element of an opaque list is an opaque value named for its index, so it is
+            # the same value in every use within the iteration (see _element_value).
+            element_value = _element_value(list_name, k)
+            if indexed:
+                iter_env[names[0]] = z3.IntVal(k)
+                iter_env[names[1]] = element_value
+            else:
+                iter_env[names[0]] = element_value if element else z3.IntVal(k)
+        elif indexed:
+            iter_env[names[0]] = z3.IntVal(k)
+            iter_env[names[1]] = z3.Select(seq.items, z3.IntVal(k))
+        else:
+            iter_env[names[0]] = z3.Select(seq.items, z3.IntVal(k)) if element else z3.IntVal(k)
         flow = _exec_stmts(list(stmt.body), iter_env, max_unroll)
         if flow[0] != "fallthrough":
             raise UnsupportedConstructError("'return' inside a loop body is not supported")
         new_names = {n for n in flow[1]
-                     if not n.startswith("<") and not n.startswith(_TEMP_PREFIX)} - before - {target}
+                     if not n.startswith("<") and not n.startswith(_TEMP_PREFIX)} - before - set(names)
         if new_names:
             raise UnsupportedConstructError(
                 f"variable(s) {sorted(new_names)} first bound inside a container loop "
                 "may be unbound after it")
         merged = _merge_envs(guard, flow[1], current, current)
+        if seq.opaque:
+            for n in names:
+                merged.pop(n, None)  # each iteration binds its own element value
         current = {**current, **merged}
-    if not target_was_bound:
-        # Python leaves the target bound only if the list is non-empty.
-        current[target] = _UNBOUND
+    for n in names:
+        if seq.opaque or not bound_before[n]:
+            # Python leaves the target bound only if the list is non-empty, and which element
+            # is last is not known for an opaque list.
+            current[n] = _UNBOUND
+    return current
+
+
+def _element_value(list_name: str, index: int) -> "_Opt":
+    """The value of element `index` of a list of Any values: optional, as Any may be None."""
+    return _Opt(z3.Bool(f"{list_name}[{index}]__none"), _AnyValue(f"{list_name}[{index}]"))
+
+
+def _unroll_literal_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) -> Dict[str, Any]:
+    """Unroll a loop over a tuple or list literal, which has a known number of elements.
+
+    As in Python, the elements are evaluated once, before the first iteration, and the
+    target takes each in turn. After a loop over a non-empty literal the target keeps its
+    last value.
+    """
+    if stmt.orelse:
+        raise UnsupportedConstructError("for ... else is not supported")
+    names = _loop_names(stmt, False)
+    if len(stmt.iter.elts) > max_unroll:
+        raise UnsupportedConstructError(f"loop over {len(stmt.iter.elts)} literal elements exceeds max_unroll")
+    values = [_as_z3_value(_expr_to_z3_safe(e, env)) for e in stmt.iter.elts]
+    bound_before = names[0] in env and not isinstance(env[names[0]], _Unbound)
+    current = env
+    for value in values:
+        iter_env = dict(current)
+        iter_env[names[0]] = value
+        flow = _exec_stmts(list(stmt.body), iter_env, max_unroll)
+        if flow[0] != "fallthrough":
+            raise UnsupportedConstructError("'return' inside a loop body is not supported")
+        current = flow[1]
+    if not values and not bound_before:
+        current[names[0]] = _UNBOUND
     return current
 
 
@@ -1009,7 +1166,13 @@ class _ContainerRewriter(ast.NodeTransformer):
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
             obj = self.env.get(func.value.id)
             if isinstance(obj, _ObjRef) and func.attr in obj.methods and func.attr not in obj.properties:
-                return (obj.methods[func.attr], obj)
+                method = obj.methods[func.attr]
+                return (method, None) if _is_static(method) else (method, obj)
+            if func.value.id not in self.env:
+                cls = scope.class_def(func.value.id)
+                method = _class_method(cls, func.attr) if cls is not None else None
+                if method is not None and _is_static(method):
+                    return (method, None)  # Cls.helper(...) for a staticmethod
         return None
 
     def _argument(self, kind: Any, node: ast.expr) -> Any:
@@ -1025,24 +1188,46 @@ class _ContainerRewriter(ast.NodeTransformer):
             if value is None or value.classdef is not kind[1]:
                 raise UnsupportedConstructError("an enum parameter needs a value of the same enum")
             return value
+        if kind in ("any", "opaque"):
+            return self._any_argument(node, allow_none=kind == "any")
         if isinstance(kind, tuple) and kind[0] == "list":
             if isinstance(node, ast.List):
+                if kind[1] == "any":
+                    raise UnsupportedConstructError("a list literal of Any values is not modelled")
                 return _list_literal_value(node, self.env)
-            if isinstance(self._container(node), _Seq):
-                return self._container(node)
-            raise UnsupportedConstructError("a list parameter needs a list")
+            c = self._container(node)
+            if isinstance(c, _Seq) and c.opaque == (kind[1] == "any"):
+                return c
+            raise UnsupportedConstructError("a list parameter needs a list of the same element type")
         if isinstance(kind, tuple) and kind[0] == "dict":
-            if isinstance(self._container(node), _Map):
-                return self._container(node)
-            raise UnsupportedConstructError("a dict parameter needs a dict")
+            if isinstance(node, ast.Dict):
+                if kind[2] == "any":
+                    raise UnsupportedConstructError("a dict literal of Any values is not modelled")
+                return _dict_literal_value(node, self.env)
+            c = self._container(node)
+            if isinstance(c, _Map) and c.opaque == (kind[2] == "any"):
+                return c
+            raise UnsupportedConstructError("a dict parameter needs a dict of the same value type")
         if isinstance(kind, tuple) and kind[0] == "opt":
             if isinstance(node, ast.Constant) and node.value is None:
                 return _Opt(z3.BoolVal(True), _DEFAULTS[kind[1]]())
             if isinstance(node, ast.Name) and isinstance(self.env.get(node.id), _Opt):
+                if isinstance(self.env[node.id].value, _AnyValue):
+                    raise UnsupportedConstructError("an Any value cannot be passed for an Optional parameter of a scalar type")
                 return self.env[node.id]
             term = _coerce(_as_z3_value(_expr_to_z3_safe(node, self.env)), kind[1])
             return _Opt(z3.BoolVal(False), term)
         return _coerce(_as_z3_value(_expr_to_z3_safe(node, self.env)), kind)
+
+    def _any_argument(self, node: ast.expr, allow_none: bool = True) -> Any:
+        """The value passed for an Any parameter: an Any value passed on unchanged, or None.
+        A parameter of an unmodelled, non-Optional type takes no None."""
+        if isinstance(node, ast.Name) and isinstance(self.env.get(node.id), _Opt) and isinstance(
+                self.env[node.id].value, _AnyValue):
+            return self.env[node.id]
+        if allow_none and isinstance(node, ast.Constant) and node.value is None:
+            return _Opt(z3.BoolVal(True), _AnyValue("None"))
+        raise UnsupportedConstructError("an argument for this parameter must be an opaque value passed on unchanged")
 
     def _default(self, kind: Any, node: ast.expr) -> Any:
         """The value of a parameter the call leaves to its default, which must be a literal,
@@ -1052,6 +1237,10 @@ class _ContainerRewriter(ast.NodeTransformer):
             if value is None or value.classdef is not kind[1]:
                 raise UnsupportedConstructError("an enum default must be a member of that enum")
             return value
+        if kind in ("any", "opaque"):
+            if isinstance(node, ast.Constant) and node.value is None:
+                return _Opt(z3.BoolVal(True), _AnyValue("None"))
+            raise UnsupportedConstructError("an opaque default is only modelled as None")
         if not isinstance(node, ast.Constant):
             raise UnsupportedConstructError("only a literal default value is modelled")
         if isinstance(kind, tuple) and kind[0] == "opt":
@@ -1179,13 +1368,14 @@ class _ContainerRewriter(ast.NodeTransformer):
         stack = self.env.get(_CALL_STACK_KEY, ())
         if name in stack or len(stack) >= MAX_CALL_DEPTH:
             raise UnsupportedConstructError(f"recursive or deeply nested call to '{name}' is not modelled")
-        if any(_base_name(d) in ("staticmethod", "classmethod") for d in func_node.decorator_list):
-            raise UnsupportedConstructError(f"'{name}' is a static or class method, which is not modelled")
-        if any(_base_name(d) != "property" for d in func_node.decorator_list):
+        decorators = {_base_name(d) for d in func_node.decorator_list}
+        if "classmethod" in decorators:
+            raise UnsupportedConstructError(f"'{name}' is a class method, which is not modelled")
+        if decorators - {"property", "staticmethod"}:
             # Any other decorator may replace the body, so the body is not what runs.
             raise UnsupportedConstructError(f"'{name}' is decorated, and a decorator is not modelled")
-        if getattr(call_node, "keywords", None):
-            raise UnsupportedConstructError(f"keyword arguments in a call to '{name}' are not modelled")
+        if "staticmethod" in decorators and obj is not None:
+            raise UnsupportedConstructError(f"'{name}' is a static method, called on an object, which is not modelled")
         args = func_node.args
         if args.vararg or args.kwarg or args.kwonlyargs or args.posonlyargs:
             raise UnsupportedConstructError(f"'{name}' has variable or keyword-only parameters, which are not modelled")
@@ -1201,7 +1391,7 @@ class _ContainerRewriter(ast.NodeTransformer):
         defaults = dict(zip((p.arg for p in params[len(params) - len(args.defaults):]), args.defaults))
         bound.update(self._bind_params(name, [
             (p.arg, _param_kind(p, func_node.body, scope), defaults.get(p.arg)) for p in callee_params
-        ], arg_nodes, []))
+        ], arg_nodes, list(getattr(call_node, "keywords", []))))
 
         callee: Dict[str, Any] = {
             _PATH_KEY: _path_of(self.env),  # the call runs only where the caller reaches it
@@ -1238,6 +1428,11 @@ class _ContainerRewriter(ast.NodeTransformer):
                 f"'{node.id}' is an enum value, which is only modelled in comparisons with a member")
         if node.id not in self.env and self._scope_class(node.id) is not None:
             raise UnsupportedConstructError(f"class '{node.id}' used as a value is not modelled")
+        scope = self.env.get(_SCOPE_KEY)
+        if node.id not in self.env and scope is not None and scope.is_module_flag(node.id):
+            # A module flag set to True or False by the module: its value is unknown, and the
+            # same in every use, so it is one Boolean.
+            self.env[node.id] = z3.Bool(node.id)
         if (node.id not in self.env and node.id not in _MODELLED_BUILTINS
                 and not self.env.get(_EXPRESSION_KEY)):
             # A free name would be read as an unknown integer, but it is a global or a
@@ -1247,6 +1442,9 @@ class _ContainerRewriter(ast.NodeTransformer):
                 "which is not modelled")
         if isinstance(self.env.get(node.id), _Opt):
             opt = self.env[node.id]
+            if isinstance(opt.value, _AnyValue):
+                raise UnsupportedConstructError(
+                    f"'{node.id}' is an Any value, which is only modelled in a None test or passed on unchanged")
             _guard(self.env, z3.Not(opt.isnone), f"value of '{node.id}' (may be None)", "type")
             return self._bind(opt.value)
         if isinstance(self.env.get(node.id), (_Seq, _Map)):
@@ -1260,6 +1458,9 @@ class _ContainerRewriter(ast.NodeTransformer):
         c = self._container(node.value)
         if c is None:
             return self.generic_visit(node)
+        if c.opaque:
+            raise UnsupportedConstructError(
+                f"an element of '{node.value.id}', a container of Any values, is not modelled")
         index = _expr_to_z3_safe(self.visit(node.slice), self.env)
         if isinstance(c, _Seq):
             i = _as_key_term(index, z3.IntSort())
@@ -1280,11 +1481,36 @@ class _ContainerRewriter(ast.NodeTransformer):
         finally:
             self.env[_PATH_KEY] = saved
 
-    def _isinstance(self, node: ast.Call) -> bool:
-        """isinstance(x, T) decided from the value's sort. Parameters are taken to
-        have the types their annotations state, which is recorded as a domain note."""
-        self.env.setdefault(_FACTS_KEY, []).append(_TYPE_NOTE)
+    def _opaque_isinstance(self, value: "_Opt", types: List[ast.expr]) -> Any:
+        """isinstance of an opaque value. Its type is fixed, but not known, so each test is one
+        Boolean named for the value and the type: repeated tests of the same type agree. None is
+        an instance of no type but object."""
+        self.env.setdefault(_FACTS_KEY, []).append(_TYPE_TEST_NOTE)
+        terms = []
+        for t in types:
+            label = t.id if isinstance(t, ast.Name) else ast.unparse(t) if isinstance(t, ast.Attribute) else None
+            if label is None:
+                raise UnsupportedConstructError("isinstance needs a class name")
+            if label == "object":
+                terms.append(z3.BoolVal(True))  # every value, None included, is an object
+                continue
+            test = z3.Bool(f"isinstance[{value.value.name}, {label}]")
+            terms.append(z3.If(value.isnone, z3.BoolVal(False), test))
+        return z3.Or(*terms)
+
+    def _isinstance(self, node: ast.Call) -> Any:
+        """isinstance(x, T) as a Z3 term. For an opaque value, see _opaque_isinstance. Otherwise
+        it is decided from the value's sort: parameters are taken to have the types their
+        annotations state, which is recorded as a domain note."""
         types = node.args[1].elts if isinstance(node.args[1], ast.Tuple) else [node.args[1]]
+        arg = node.args[0]
+        if isinstance(arg, ast.Name) and isinstance(self.env.get(arg.id), _Opt) and isinstance(
+                self.env[arg.id].value, _AnyValue):
+            return self._opaque_isinstance(self.env[arg.id], types)
+        return z3.BoolVal(self._isinstance_of_sort(node, types))
+
+    def _isinstance_of_sort(self, node: ast.Call, types: List[ast.expr]) -> bool:
+        self.env.setdefault(_FACTS_KEY, []).append(_TYPE_NOTE)
         names = {t.id for t in types if isinstance(t, ast.Name)}
         if len(names) != len(types) or not names <= _ISINSTANCE_TYPES:
             raise UnsupportedConstructError("isinstance is only modelled for int, bool, float, str, list and dict")
@@ -1336,7 +1562,7 @@ class _ContainerRewriter(ast.NodeTransformer):
 
     def visit_Call(self, node: ast.Call) -> ast.expr:
         if (isinstance(node.func, ast.Name) and node.func.id == "isinstance" and len(node.args) == 2):
-            return self._bind(z3.BoolVal(self._isinstance(node)))
+            return self._bind(self._isinstance(node))
         if (isinstance(node.func, ast.Name) and node.func.id == "len" and len(node.args) == 1
                 and isinstance(node.args[0], ast.Name)):
             c = self._container(node.args[0])
@@ -1479,6 +1705,16 @@ def _class_attribute_term(cls: ast.ClassDef, attr: str) -> Any:
     raise UnsupportedConstructError(f"class attribute '{cls.name}.{attr}' is not a literal, so it is not modelled")
 
 
+def _is_static(func: ast.FunctionDef) -> bool:
+    return any(_name_of(d) == "staticmethod" for d in func.decorator_list)
+
+
+def _class_method(classdef: ast.ClassDef, name: str) -> Optional[ast.FunctionDef]:
+    """The method a class defines once under `name`, or None."""
+    defs = [s for s in classdef.body if isinstance(s, ast.FunctionDef) and s.name == name]
+    return defs[0] if len(defs) == 1 else None
+
+
 def _dataclass_check(classdef: ast.ClassDef) -> None:
     """Raise unless the class is a dataclass whose `==` is the comparison of its fields.
 
@@ -1583,6 +1819,38 @@ def _same_result(a: Any, b: Any) -> Any:
             raise UnsupportedConstructError("the two functions return objects of different classes, or an object on one side only")
         return z3.And(*[_field_equal(a.fields[f], b.fields[f]) for f in a.fields]) if a.fields else z3.BoolVal(True)
     return _as_z3_value(a) == _as_z3_value(b)
+
+
+_DEFAULT_OF_SORT = {z3.RealSort(): z3.RealVal(0), z3.IntSort(): z3.IntVal(0),
+                    z3.StringSort(): z3.StringVal(""), z3.BoolSort(): z3.BoolVal(False)}
+
+
+def _dict_literal_value(node: ast.Dict, env: Dict[str, Any]) -> _Map:
+    """A dict literal with int or str keys and scalar values, each of one sort.
+
+    As in Python, the pairs are evaluated in order, and a repeated key keeps its last
+    value. An empty literal has no key sort, so a key of the wrong sort used on it is
+    rejected when it is used (see _as_key_term).
+    """
+    if any(k is None for k in node.keys):
+        raise UnsupportedConstructError("a dict literal with ** unpacking is not modelled")
+    pairs = [(_as_z3_value(_expr_to_z3_safe(k, env)), _as_z3_value(_expr_to_z3_safe(v, env)))
+             for k, v in zip(node.keys, node.values)]
+    if not pairs:
+        return _Map(z3.K(z3.IntSort(), z3.BoolVal(False)), z3.K(z3.IntSort(), z3.IntVal(0)))
+    key_sort, value_sort = pairs[0][0].sort(), pairs[0][1].sort()
+    if key_sort not in (z3.IntSort(), z3.StringSort()):
+        raise UnsupportedConstructError("dict literal keys must be int or str")
+    if value_sort not in _DEFAULT_OF_SORT:
+        raise UnsupportedConstructError("dict literal values must be int, float, str or bool")
+    present = z3.K(key_sort, z3.BoolVal(False))
+    values = z3.K(key_sort, _DEFAULT_OF_SORT[value_sort])
+    for key, value in pairs:
+        if key.sort() != key_sort or value.sort() != value_sort:
+            raise UnsupportedConstructError("dict literal keys and values must each share one sort")
+        present = z3.Store(present, key, z3.BoolVal(True))
+        values = z3.Store(values, key, value)
+    return _Map(present, values)
 
 
 def _list_literal_value(node: ast.List, env: Dict[str, Any]) -> _Seq:
@@ -1890,6 +2158,12 @@ def _exec_stmts(
             if record is not None:
                 _bind_record(env, stmt.target.id, record)
                 continue
+            if isinstance(stmt.value, ast.List):
+                env[stmt.target.id] = _list_literal_value(stmt.value, env)  # `xs: List[int] = [...]`
+                continue
+            if isinstance(stmt.value, ast.Dict):
+                env[stmt.target.id] = _dict_literal_value(stmt.value, env)  # `d: Dict[str, int] = {...}`
+                continue
             env[stmt.target.id] = _expr_to_z3_safe(stmt.value, env)
             continue
 
@@ -1911,6 +2185,10 @@ def _exec_stmts(
             if (len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
                     and isinstance(stmt.value, ast.List)):
                 env[stmt.targets[0].id] = _list_literal_value(stmt.value, env)
+                continue
+            if (len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                    and isinstance(stmt.value, ast.Dict)):
+                env[stmt.targets[0].id] = _dict_literal_value(stmt.value, env)
                 continue
             enum_value = _enum_operand(stmt.value, env)
             if enum_value is not None and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
@@ -1993,6 +2271,9 @@ def _exec_stmts(
             return _branch_flows(cond, then_flow, then_env, else_flow, else_env, env,
                                  list(stmts[idx + 1:]), max_unroll)
 
+        if isinstance(stmt, ast.For) and isinstance(stmt.iter, (ast.Tuple, ast.List)):
+            env.update(_unroll_literal_loop(stmt, env, max_unroll))
+            continue
         if isinstance(stmt, ast.For) and _is_container_loop(stmt, env):
             env.update(_unroll_container_loop(stmt, env, max_unroll))
             continue
@@ -2241,6 +2522,11 @@ def verify_function_equivalence(
             same_state.append(_final_field(exits_a, key, cache[key]) == _final_field(exits_b, key, cache[key]))
         claim_a, claim_b = z3.BoolVal(True), z3.And(same_result, *same_state)
     result = _prove_equal(claim_a, claim_b, assume)
+    if result.status == "decided" and result.equivalent is False and any(
+            isinstance(f, str) and f == _TYPE_TEST_NOTE for f in facts):
+        # The type tests of opaque values are independent unknowns, so the counterexample may
+        # assign types that no value has together. It is not a claim about real inputs.
+        return EquivalenceResult(status="unsupported", reason=_TYPE_TEST_NOTE)
     result.domain = _notes_of(facts)
     result.proof_a = str(result_a)
     result.proof_b = str(result_b)

@@ -109,9 +109,9 @@ class TestUnusedParameters:
         assert r.status in ("simplified", "already_simplest"), r.summary()
 
     def test_used_unmodelled_parameter_is_rejected(self):
-        r = simplify_function("def f(x: int, cfg: Any):\n    return cfg\n", "f")
+        r = simplify_function("def f(x: int, cfg: set[str]):\n    return cfg\n", "f")
         assert r.status == "unsupported"
-        assert "not modelled" in r.reason
+        assert "Any value" in r.reason  # an unmodelled type is opaque, and returning it is rejected
 
     def test_unused_class_parameter_is_ignored(self):
         r = verify_function_equivalence(
