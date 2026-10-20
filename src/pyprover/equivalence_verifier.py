@@ -522,10 +522,13 @@ def _merge_envs(cond: Any, then_env: Dict[str, Any], else_env: Dict[str, Any],
 
 
 def _is_container_loop(stmt: ast.For, env: Dict[str, Any]) -> bool:
-    """`for x in xs` or `for i in range(len(xs))` where xs is a container parameter/literal."""
+    """`for x in xs`, `for i, x in enumerate(xs)` or `for i in range(len(xs))` where xs is a
+    container parameter or literal."""
     it = stmt.iter
     if isinstance(it, ast.Name):
         return isinstance(env.get(it.id), _Seq)
+    if _is_enumerate(it):
+        return isinstance(it.args[0], ast.Name) and isinstance(env.get(it.args[0].id), _Seq)
     return (isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range"
             and len(it.args) == 1 and isinstance(it.args[0], ast.Call)
             and isinstance(it.args[0].func, ast.Name) and it.args[0].func.id == "len"
@@ -585,6 +588,22 @@ def _unroll_symbolic_range(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
     return current
 
 
+def _is_enumerate(node: ast.expr) -> bool:
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "enumerate"
+            and len(node.args) == 1 and not node.keywords)
+
+
+def _loop_names(stmt: ast.For, indexed: bool) -> List[str]:
+    """The names a loop binds: one name, or the (index, element) pair of an enumerate."""
+    if not indexed and isinstance(stmt.target, ast.Name):
+        return [stmt.target.id]
+    if indexed and isinstance(stmt.target, ast.Tuple) and len(stmt.target.elts) == 2 and all(
+            isinstance(e, ast.Name) for e in stmt.target.elts):
+        return [e.id for e in stmt.target.elts]
+    raise UnsupportedConstructError(
+        "loop variable must be a simple name, or an (index, element) pair for enumerate")
+
+
 def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) -> Dict[str, Any]:
     """Unroll a loop over a container whose length is symbolic.
 
@@ -592,21 +611,27 @@ def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
     every list of length at most `max_unroll`. Longer lists are not covered, and
     the loop records the fact `length <= max_unroll` so every claim that uses this
     loop is stated for that domain only.
+
+    The loop takes `x in xs` (the element), `i in range(len(xs))` (the index), or
+    `i, x in enumerate(xs)` (both).
     """
-    if not isinstance(stmt.target, ast.Name):
-        raise UnsupportedConstructError("loop variable must be a simple name")
     if stmt.orelse:
         raise UnsupportedConstructError("for ... else is not supported")
-    target = stmt.target.id
-    target_was_bound = target in env and not isinstance(env[target], _Unbound)
-    if isinstance(stmt.iter, ast.Name):
+    if _is_enumerate(stmt.iter):
+        if not isinstance(stmt.iter.args[0], ast.Name):
+            raise UnsupportedConstructError("enumerate is only modelled over a list parameter or literal")
+        seq = env[stmt.iter.args[0].id]
+        indexed, element = True, True
+    elif isinstance(stmt.iter, ast.Name):
         seq = env[stmt.iter.id]
-        element = True   # the target takes seq.items[k]
-        if seq.opaque:
-            raise UnsupportedConstructError("iterating a list of Any values is not modelled")
+        indexed, element = False, True  # the target takes seq.items[k]
     else:
         seq = env[stmt.iter.args[0].args[0].id]
-        element = False  # the target takes the index k, which uses the length alone
+        indexed, element = False, False  # the target takes the index k, which uses the length alone
+    if element and seq.opaque:
+        raise UnsupportedConstructError("iterating a list of Any values is not modelled")
+    names = _loop_names(stmt, indexed)
+    bound_before = {n: n in env and not isinstance(env[n], _Unbound) for n in names}
 
     facts = env.setdefault(_FACTS_KEY, [])
     facts.append(seq.length <= max_unroll)
@@ -617,21 +642,53 @@ def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
         guard = seq.length > k
         iter_env = dict(current)
         iter_env[_PATH_KEY] = z3.And(_path_of(current), guard)
-        iter_env[target] = z3.Select(seq.items, z3.IntVal(k)) if element else z3.IntVal(k)
+        if indexed:
+            iter_env[names[0]] = z3.IntVal(k)
+            iter_env[names[1]] = z3.Select(seq.items, z3.IntVal(k))
+        else:
+            iter_env[names[0]] = z3.Select(seq.items, z3.IntVal(k)) if element else z3.IntVal(k)
         flow = _exec_stmts(list(stmt.body), iter_env, max_unroll)
         if flow[0] != "fallthrough":
             raise UnsupportedConstructError("'return' inside a loop body is not supported")
         new_names = {n for n in flow[1]
-                     if not n.startswith("<") and not n.startswith(_TEMP_PREFIX)} - before - {target}
+                     if not n.startswith("<") and not n.startswith(_TEMP_PREFIX)} - before - set(names)
         if new_names:
             raise UnsupportedConstructError(
                 f"variable(s) {sorted(new_names)} first bound inside a container loop "
                 "may be unbound after it")
         merged = _merge_envs(guard, flow[1], current, current)
         current = {**current, **merged}
-    if not target_was_bound:
-        # Python leaves the target bound only if the list is non-empty.
-        current[target] = _UNBOUND
+    for n in names:
+        if not bound_before[n]:
+            # Python leaves the target bound only if the list is non-empty.
+            current[n] = _UNBOUND
+    return current
+
+
+def _unroll_literal_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) -> Dict[str, Any]:
+    """Unroll a loop over a tuple or list literal, which has a known number of elements.
+
+    As in Python, the elements are evaluated once, before the first iteration, and the
+    target takes each in turn. After a loop over a non-empty literal the target keeps its
+    last value.
+    """
+    if stmt.orelse:
+        raise UnsupportedConstructError("for ... else is not supported")
+    names = _loop_names(stmt, False)
+    if len(stmt.iter.elts) > max_unroll:
+        raise UnsupportedConstructError(f"loop over {len(stmt.iter.elts)} literal elements exceeds max_unroll")
+    values = [_as_z3_value(_expr_to_z3_safe(e, env)) for e in stmt.iter.elts]
+    bound_before = names[0] in env and not isinstance(env[names[0]], _Unbound)
+    current = env
+    for value in values:
+        iter_env = dict(current)
+        iter_env[names[0]] = value
+        flow = _exec_stmts(list(stmt.body), iter_env, max_unroll)
+        if flow[0] != "fallthrough":
+            raise UnsupportedConstructError("'return' inside a loop body is not supported")
+        current = flow[1]
+    if not values and not bound_before:
+        current[names[0]] = _UNBOUND
     return current
 
 
@@ -2062,6 +2119,9 @@ def _exec_stmts(
             return _branch_flows(cond, then_flow, then_env, else_flow, else_env, env,
                                  list(stmts[idx + 1:]), max_unroll)
 
+        if isinstance(stmt, ast.For) and isinstance(stmt.iter, (ast.Tuple, ast.List)):
+            env.update(_unroll_literal_loop(stmt, env, max_unroll))
+            continue
         if isinstance(stmt, ast.For) and _is_container_loop(stmt, env):
             env.update(_unroll_container_loop(stmt, env, max_unroll))
             continue
