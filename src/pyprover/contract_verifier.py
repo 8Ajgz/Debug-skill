@@ -227,6 +227,20 @@ _OP_MAP = {
 }
 
 
+def _length_const(name: str, env: Dict[str, Any]) -> Any:
+    """The Z3 symbol for len(name), the same one a clause's len(name) uses."""
+    return z3_builtins.try_call_to_z3(ast.parse(f"len({name})", mode="eval").body, env, _expr_to_z3)
+
+
+def normalized_index(index: Any, length: Any) -> Any:
+    """Python's negative indexing: arr[-1] is arr[len(arr) - 1]."""
+    return z3.If(index < 0, index + length, index)
+
+
+def _mentions_result(clause: str) -> bool:
+    return any(alias in clause.lower() for alias in _RESULT_ALIASES)
+
+
 def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
     """Recursively convert an AST expression node to a Z3 expression."""
     if isinstance(node, ast.Constant):
@@ -285,6 +299,14 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
             result = part if result is None else z3.And(result, part)
             left = right
         return result
+    if isinstance(node, ast.Subscript):
+        if isinstance(node.value, ast.Name) and isinstance(env.get(node.value.id), z3.ArrayRef):
+            index = _expr_to_z3(node.slice, env)
+            if isinstance(index, int) and not isinstance(index, bool):
+                index = z3.IntVal(index)
+            length = _length_const(node.value.id, env)
+            return z3.Select(env[node.value.id], normalized_index(index, length))
+        raise NotImplementedError("subscript of a value that is not a parameter array")
     if isinstance(node, ast.IfExp):
         test = _expr_to_z3(node.test, env)
         if isinstance(test, bool):
@@ -631,17 +653,36 @@ class ContractVerifier:
         post_verified = 0
         post_unproven: List[str] = []
 
+        # Bodies the inliner cannot express (loops, array writes) go to the
+        # verification-condition model. That import is local because loop_vc
+        # builds on this module.
+        loop_verdicts = None
+        if return_text is None and any(_mentions_result(c) for c in contract.postconditions):
+            from . import loop_vc
+            loop_verdicts = loop_vc.check_result_clauses(
+                code,
+                [c for c in contract.postconditions if _mentions_result(c)],
+                contract.preconditions,
+                float_annotated_params(code),
+            )
+
         for clause in contract.postconditions:
-            references_result = any(alias in clause.lower() for alias in _RESULT_ALIASES)
+            references_result = _mentions_result(clause)
             if references_result:
                 # Substitute the function's own return expression for ``result`` and
-                # check it like any other postcondition. Without a single return
-                # expression there is nothing to substitute, so the clause stays unproven.
+                # check it like any other postcondition.
                 if return_text is None:
-                    post_unproven.append(clause)
-                    result["details"].append(
-                        f"  Post '{clause}' — not proven (no single return expression to check result against)"
-                    )
+                    verdict, detail = (loop_verdicts or {}).get(clause, ("unknown", None))
+                    if verdict == "yes":
+                        post_verified += 1
+                        result["details"].append(f"  Post '{clause}' — implied by preconditions (loop model) ✓")
+                    else:
+                        post_unproven.append(clause)
+                        if verdict == "no":
+                            note = f" (the loop model finds a counterexample, which may not be reachable: {detail})"
+                        else:
+                            note = f" ({detail})" if detail else " (no single return expression, and the loop model cannot judge it)"
+                        result["details"].append(f"  Post '{clause}' — not proven{note}")
                     continue
                 z3_expr = _clause_to_z3(_substitute_result(clause, return_text), env)
             else:

@@ -245,13 +245,24 @@ def f(n):
     assert result.get("inconclusive") is True
 
 
-def test_subscript_write_is_inconclusive():
+def test_subscript_write_to_one_array_is_modelled():
     code = """
 def f(arr):
     # Pre: len(arr) > 0
     # Post: result >= 0
     arr[0] = 5
     return 5
+"""
+    assert _verify(code)["verified"] is True
+
+
+def test_array_write_with_second_array_is_inconclusive():
+    code = """
+def f(a, b):
+    # Pre: len(a) > 0
+    # Post: result == 0
+    a[0] = 5
+    return b[0] - b[0]
 """
     result = _verify(code)
     assert result["verified"] is False
