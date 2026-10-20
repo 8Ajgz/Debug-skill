@@ -67,12 +67,71 @@ def subclass_members(classes: Iterable[ast.ClassDef], name: str) -> Set[str]:
     return members
 
 
+def module_bool_flags(tree: ast.Module) -> Set[str]:
+    """Names that a module binds to True or False, and to nothing else.
+
+    A flag is typically set in a try block (`_OK = True` / `except ImportError: _OK = False`).
+    A name is excluded if the module also binds it otherwise: by a def, class, import, loop
+    or with target, a tuple target, an augmented assignment, or a `global` declaration in any
+    function, which could change it at run time.
+    """
+    flags: Set[str] = set()
+    other: Set[str] = set()
+
+    def bind_target(target: ast.expr) -> None:
+        for n in ast.walk(target):
+            if isinstance(n, ast.Name):
+                other.add(n.id)
+
+    def visit(stmts: List[ast.stmt]) -> None:
+        for st in stmts:
+            if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                other.add(st.name)
+            elif isinstance(st, (ast.Import, ast.ImportFrom)):
+                other.update((a.asname or a.name).split(".")[0] for a in st.names)
+            elif isinstance(st, ast.Assign):
+                for t in st.targets:
+                    if isinstance(t, ast.Name) and isinstance(st.value, ast.Constant) and isinstance(st.value.value, bool):
+                        flags.add(t.id)
+                    else:
+                        bind_target(t)
+            elif isinstance(st, (ast.AnnAssign, ast.AugAssign)):
+                bind_target(st.target)
+            elif isinstance(st, (ast.For, ast.AsyncFor)):
+                bind_target(st.target)
+                visit(st.body)
+                visit(st.orelse)
+            elif isinstance(st, (ast.With, ast.AsyncWith)):
+                for item in st.items:
+                    if item.optional_vars is not None:
+                        bind_target(item.optional_vars)
+                visit(st.body)
+            elif isinstance(st, (ast.If, ast.While)):
+                visit(st.body)
+                visit(st.orelse)
+            elif isinstance(st, ast.Try):
+                visit(st.body)
+                for h in st.handlers:
+                    if h.name:
+                        other.add(h.name)
+                    visit(h.body)
+                visit(st.orelse)
+                visit(st.finalbody)
+
+    visit(tree.body)
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Global):
+            other.update(n.names)
+    return flags - other
+
+
 class _Module:
-    """The top-level definitions and the imports of one source file."""
+    """The top-level definitions, the imports, and the bool flags of one source file."""
 
     def __init__(self, tree: ast.Module, rel_path: str, root: str):
         self.defs: Dict[str, Definition] = {}
         self.imports: Dict[str, Tuple[Optional[str], str]] = {}
+        self.flags: Set[str] = module_bool_flags(tree)
         for stmt in tree.body:
             if isinstance(stmt, (ast.ClassDef, ast.FunctionDef)):
                 self.defs[stmt.name] = stmt
@@ -157,6 +216,11 @@ class ProjectScope:
                     self._classes.extend(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef))
         return self._classes
 
+    def is_module_flag(self, name: str) -> bool:
+        """True if the file binds `name` only to True or False (see module_bool_flags)."""
+        module = self._load(self.rel_path)
+        return module is not None and name in module.flags
+
     def subclass_members(self, classdef: ast.ClassDef) -> Set[str]:
         """The names a subclass of `classdef` anywhere in the repository defines (see subclass_members)."""
         return subclass_members(self._repo_classes(), classdef.name)
@@ -168,4 +232,4 @@ class ProjectScope:
         return self._lookup(self.rel_path, name, ast.FunctionDef, 0)  # type: ignore[return-value]
 
 
-__all__ = ["ProjectScope"]
+__all__ = ["ProjectScope", "module_bool_flags"]

@@ -152,17 +152,32 @@ def f(x):
     assert "decorated" in r.reason
 
 
-def test_keyword_argument_is_rejected():
+def test_keyword_arguments_bind_by_name():
     code = '''
 def scale(x, k):
     return x * k
 
 def f(x):
-    return scale(x, k=2)
+    return scale(x=2, k=x)
+
+def g(x):
+    return 2 * x
+'''
+    assert verify_function_equivalence(code, "f", code, "g").equivalent is True
+    _check_rendered(code, "f", [(i,) for i in range(-3, 4)])
+
+
+def test_keyword_naming_no_parameter_is_rejected():
+    code = '''
+def scale(x, k):
+    return x * k
+
+def f(x):
+    return scale(x, z=2)
 '''
     r = simplify_function(code, "f")
     assert r.status == "unsupported"
-    assert "keyword" in r.reason
+    assert "names no parameter" in r.reason
 
 
 # --- objects ------------------------------------------------------------------

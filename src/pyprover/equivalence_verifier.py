@@ -86,7 +86,7 @@ except ImportError:
     Z3_AVAILABLE = False
 
 from .contract_verifier import _expr_to_z3, _OP_MAP, _as_real
-from .project_index import base_name as _name_of, subclass_members as _subclass_members
+from .project_index import base_name as _name_of, module_bool_flags, subclass_members as _subclass_members
 
 _Z3_TIMEOUT_MS = 5000
 DEFAULT_MAX_UNROLL = 64
@@ -185,6 +185,8 @@ _WRITES_NOTE = "only the returned value is simplified; field writes are not part
 _RAISE_NOTE = "inputs that reach a raise statement are excluded"
 _RANGE_NOTE = "loops over range(n) are exact for n at most the unroll bound"
 _ENUM_NOTE = "an enum value is shown as the index of its member"
+_TYPE_TEST_NOTE = ("a test of an opaque value's type is an unknown truth value, which is not related "
+                   "to the tests of other types, so a counterexample that depends on one is not reported")
 _CLOSED_NOTE = ("a class's methods and fields are taken to be its own, since no subclass is in the "
                 "analysed code; pass a ProjectScope to check the repository")
 
@@ -270,6 +272,10 @@ class _LocalScope:
         self._classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
         self._functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
         self._all_classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+        self._flags = module_bool_flags(tree)
+
+    def is_module_flag(self, name: str) -> bool:
+        return name in self._flags
 
     def class_def(self, name: str) -> Optional[ast.ClassDef]:
         return self._classes.get(name)
@@ -541,19 +547,38 @@ def _merge_envs(cond: Any, then_env: Dict[str, Any], else_env: Dict[str, Any],
     return merged
 
 
+def _list_source(node: ast.expr, env: Dict[str, Any]) -> Optional[Tuple["_Seq", str]]:
+    """The list an iterable names, with the name its elements are keyed by, or None.
+
+    A list-valued name, or a list field of an object (bound on first use, as a field read
+    binds it). Anything else, such as a call that returns a list, is not a list the model
+    knows: iterating it could raise, which the loop model would not show."""
+    if isinstance(node, ast.Name):
+        value = env.get(node.id)
+        return (value, node.id) if isinstance(value, _Seq) else None
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        obj = env.get(node.value.id)
+        kind = obj.fields.get(node.attr) if isinstance(obj, _ObjRef) else None
+        if isinstance(kind, tuple) and kind[0] == "list" and node.attr not in obj.methods:
+            key = f"{obj.prefix}{node.attr}"
+            if key not in env:
+                env[key] = obj.value(node.attr)
+            return (env[key], key)
+    return None
+
+
 def _is_container_loop(stmt: ast.For, env: Dict[str, Any]) -> bool:
     """`for x in xs`, `for i, x in enumerate(xs)` or `for i in range(len(xs))` where xs is a
-    container parameter or literal."""
+    list parameter, literal, or list field of an object."""
     it = stmt.iter
-    if isinstance(it, ast.Name):
-        return isinstance(env.get(it.id), _Seq)
+    if isinstance(it, (ast.Name, ast.Attribute)):
+        return _list_source(it, env) is not None
     if _is_enumerate(it):
-        return isinstance(it.args[0], ast.Name) and isinstance(env.get(it.args[0].id), _Seq)
+        return _list_source(it.args[0], env) is not None
     return (isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range"
             and len(it.args) == 1 and isinstance(it.args[0], ast.Call)
             and isinstance(it.args[0].func, ast.Name) and it.args[0].func.id == "len"
-            and len(it.args[0].args) == 1 and isinstance(it.args[0].args[0], ast.Name)
-            and isinstance(env.get(it.args[0].args[0].id), _Seq))
+            and len(it.args[0].args) == 1 and _list_source(it.args[0].args[0], env) is not None)
 
 
 def _is_symbolic_range(stmt: ast.For) -> bool:
@@ -638,18 +663,15 @@ def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
     if stmt.orelse:
         raise UnsupportedConstructError("for ... else is not supported")
     if _is_enumerate(stmt.iter):
-        if not isinstance(stmt.iter.args[0], ast.Name):
-            raise UnsupportedConstructError("enumerate is only modelled over a list parameter or literal")
-        list_name = stmt.iter.args[0].id
-        seq = env[list_name]
+        seq, list_name = _list_source(stmt.iter.args[0], env) or (None, None)
+        if seq is None:
+            raise UnsupportedConstructError("enumerate is only modelled over a list parameter, literal or field")
         indexed, element = True, True
-    elif isinstance(stmt.iter, ast.Name):
-        list_name = stmt.iter.id
-        seq = env[list_name]
+    elif isinstance(stmt.iter, (ast.Name, ast.Attribute)):
+        seq, list_name = _list_source(stmt.iter, env)
         indexed, element = False, True  # the target takes seq.items[k]
     else:
-        list_name = stmt.iter.args[0].args[0].id
-        seq = env[list_name]
+        seq, list_name = _list_source(stmt.iter.args[0].args[0], env)
         indexed, element = False, False  # the target takes the index k, which uses the length alone
     names = _loop_names(stmt, indexed)
     bound_before = {n: n in env and not isinstance(env[n], _Unbound) for n in names}
@@ -1144,7 +1166,13 @@ class _ContainerRewriter(ast.NodeTransformer):
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
             obj = self.env.get(func.value.id)
             if isinstance(obj, _ObjRef) and func.attr in obj.methods and func.attr not in obj.properties:
-                return (obj.methods[func.attr], obj)
+                method = obj.methods[func.attr]
+                return (method, None) if _is_static(method) else (method, obj)
+            if func.value.id not in self.env:
+                cls = scope.class_def(func.value.id)
+                method = _class_method(cls, func.attr) if cls is not None else None
+                if method is not None and _is_static(method):
+                    return (method, None)  # Cls.helper(...) for a staticmethod
         return None
 
     def _argument(self, kind: Any, node: ast.expr) -> Any:
@@ -1340,13 +1368,14 @@ class _ContainerRewriter(ast.NodeTransformer):
         stack = self.env.get(_CALL_STACK_KEY, ())
         if name in stack or len(stack) >= MAX_CALL_DEPTH:
             raise UnsupportedConstructError(f"recursive or deeply nested call to '{name}' is not modelled")
-        if any(_base_name(d) in ("staticmethod", "classmethod") for d in func_node.decorator_list):
-            raise UnsupportedConstructError(f"'{name}' is a static or class method, which is not modelled")
-        if any(_base_name(d) != "property" for d in func_node.decorator_list):
+        decorators = {_base_name(d) for d in func_node.decorator_list}
+        if "classmethod" in decorators:
+            raise UnsupportedConstructError(f"'{name}' is a class method, which is not modelled")
+        if decorators - {"property", "staticmethod"}:
             # Any other decorator may replace the body, so the body is not what runs.
             raise UnsupportedConstructError(f"'{name}' is decorated, and a decorator is not modelled")
-        if getattr(call_node, "keywords", None):
-            raise UnsupportedConstructError(f"keyword arguments in a call to '{name}' are not modelled")
+        if "staticmethod" in decorators and obj is not None:
+            raise UnsupportedConstructError(f"'{name}' is a static method, called on an object, which is not modelled")
         args = func_node.args
         if args.vararg or args.kwarg or args.kwonlyargs or args.posonlyargs:
             raise UnsupportedConstructError(f"'{name}' has variable or keyword-only parameters, which are not modelled")
@@ -1362,7 +1391,7 @@ class _ContainerRewriter(ast.NodeTransformer):
         defaults = dict(zip((p.arg for p in params[len(params) - len(args.defaults):]), args.defaults))
         bound.update(self._bind_params(name, [
             (p.arg, _param_kind(p, func_node.body, scope), defaults.get(p.arg)) for p in callee_params
-        ], arg_nodes, []))
+        ], arg_nodes, list(getattr(call_node, "keywords", []))))
 
         callee: Dict[str, Any] = {
             _PATH_KEY: _path_of(self.env),  # the call runs only where the caller reaches it
@@ -1399,6 +1428,11 @@ class _ContainerRewriter(ast.NodeTransformer):
                 f"'{node.id}' is an enum value, which is only modelled in comparisons with a member")
         if node.id not in self.env and self._scope_class(node.id) is not None:
             raise UnsupportedConstructError(f"class '{node.id}' used as a value is not modelled")
+        scope = self.env.get(_SCOPE_KEY)
+        if node.id not in self.env and scope is not None and scope.is_module_flag(node.id):
+            # A module flag set to True or False by the module: its value is unknown, and the
+            # same in every use, so it is one Boolean.
+            self.env[node.id] = z3.Bool(node.id)
         if (node.id not in self.env and node.id not in _MODELLED_BUILTINS
                 and not self.env.get(_EXPRESSION_KEY)):
             # A free name would be read as an unknown integer, but it is a global or a
@@ -1447,11 +1481,36 @@ class _ContainerRewriter(ast.NodeTransformer):
         finally:
             self.env[_PATH_KEY] = saved
 
-    def _isinstance(self, node: ast.Call) -> bool:
-        """isinstance(x, T) decided from the value's sort. Parameters are taken to
-        have the types their annotations state, which is recorded as a domain note."""
-        self.env.setdefault(_FACTS_KEY, []).append(_TYPE_NOTE)
+    def _opaque_isinstance(self, value: "_Opt", types: List[ast.expr]) -> Any:
+        """isinstance of an opaque value. Its type is fixed, but not known, so each test is one
+        Boolean named for the value and the type: repeated tests of the same type agree. None is
+        an instance of no type but object."""
+        self.env.setdefault(_FACTS_KEY, []).append(_TYPE_TEST_NOTE)
+        terms = []
+        for t in types:
+            label = t.id if isinstance(t, ast.Name) else ast.unparse(t) if isinstance(t, ast.Attribute) else None
+            if label is None:
+                raise UnsupportedConstructError("isinstance needs a class name")
+            if label == "object":
+                terms.append(z3.BoolVal(True))  # every value, None included, is an object
+                continue
+            test = z3.Bool(f"isinstance[{value.value.name}, {label}]")
+            terms.append(z3.If(value.isnone, z3.BoolVal(False), test))
+        return z3.Or(*terms)
+
+    def _isinstance(self, node: ast.Call) -> Any:
+        """isinstance(x, T) as a Z3 term. For an opaque value, see _opaque_isinstance. Otherwise
+        it is decided from the value's sort: parameters are taken to have the types their
+        annotations state, which is recorded as a domain note."""
         types = node.args[1].elts if isinstance(node.args[1], ast.Tuple) else [node.args[1]]
+        arg = node.args[0]
+        if isinstance(arg, ast.Name) and isinstance(self.env.get(arg.id), _Opt) and isinstance(
+                self.env[arg.id].value, _AnyValue):
+            return self._opaque_isinstance(self.env[arg.id], types)
+        return z3.BoolVal(self._isinstance_of_sort(node, types))
+
+    def _isinstance_of_sort(self, node: ast.Call, types: List[ast.expr]) -> bool:
+        self.env.setdefault(_FACTS_KEY, []).append(_TYPE_NOTE)
         names = {t.id for t in types if isinstance(t, ast.Name)}
         if len(names) != len(types) or not names <= _ISINSTANCE_TYPES:
             raise UnsupportedConstructError("isinstance is only modelled for int, bool, float, str, list and dict")
@@ -1503,7 +1562,7 @@ class _ContainerRewriter(ast.NodeTransformer):
 
     def visit_Call(self, node: ast.Call) -> ast.expr:
         if (isinstance(node.func, ast.Name) and node.func.id == "isinstance" and len(node.args) == 2):
-            return self._bind(z3.BoolVal(self._isinstance(node)))
+            return self._bind(self._isinstance(node))
         if (isinstance(node.func, ast.Name) and node.func.id == "len" and len(node.args) == 1
                 and isinstance(node.args[0], ast.Name)):
             c = self._container(node.args[0])
@@ -1644,6 +1703,16 @@ def _class_attribute_term(cls: ast.ClassDef, attr: str) -> Any:
     if len(assigns) == 1 and isinstance(assigns[0].value, ast.Constant) and assigns[0].value.value is not None:
         return _literal_term(assigns[0].value.value)
     raise UnsupportedConstructError(f"class attribute '{cls.name}.{attr}' is not a literal, so it is not modelled")
+
+
+def _is_static(func: ast.FunctionDef) -> bool:
+    return any(_name_of(d) == "staticmethod" for d in func.decorator_list)
+
+
+def _class_method(classdef: ast.ClassDef, name: str) -> Optional[ast.FunctionDef]:
+    """The method a class defines once under `name`, or None."""
+    defs = [s for s in classdef.body if isinstance(s, ast.FunctionDef) and s.name == name]
+    return defs[0] if len(defs) == 1 else None
 
 
 def _dataclass_check(classdef: ast.ClassDef) -> None:
@@ -2453,6 +2522,11 @@ def verify_function_equivalence(
             same_state.append(_final_field(exits_a, key, cache[key]) == _final_field(exits_b, key, cache[key]))
         claim_a, claim_b = z3.BoolVal(True), z3.And(same_result, *same_state)
     result = _prove_equal(claim_a, claim_b, assume)
+    if result.status == "decided" and result.equivalent is False and any(
+            isinstance(f, str) and f == _TYPE_TEST_NOTE for f in facts):
+        # The type tests of opaque values are independent unknowns, so the counterexample may
+        # assign types that no value has together. It is not a claim about real inputs.
+        return EquivalenceResult(status="unsupported", reason=_TYPE_TEST_NOTE)
     result.domain = _notes_of(facts)
     result.proof_a = str(result_a)
     result.proof_b = str(result_b)
