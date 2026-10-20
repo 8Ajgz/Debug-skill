@@ -117,7 +117,7 @@ class LoopVerificationReport:
 # ---------------------------------------------------------------------------
 
 # Patterns: match  # Invariant: expr   //Invariant: expr   /* Inv: expr */
-from .contract_verifier import _DECORATOR_CONTRACT_RE, _STRING_PIECE_RE
+from .contract_verifier import _DECORATOR_CONTRACT_RE, _STRING_PIECE_RE, _as_real, _is_real
 
 _INVARIANT_RE = re.compile(
     r"(?:#|//|/\*)\s*[Ii]nv(?:ariant)?:\s*(.*?)(?:\*/)?$"
@@ -184,6 +184,19 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
     if isinstance(node, ast.BinOp):
         left = _expr_to_z3(node.left, env)
         right = _expr_to_z3(node.right, env)
+        if isinstance(node.op, ast.Div):
+            # Python's / is real division; Z3's Int / is integer division.
+            return _as_real(left) / _as_real(right)
+        if isinstance(node.op, (ast.FloorDiv, ast.Mod)):
+            # Z3's div/mod are Euclidean and differ from Python for negative or
+            # symbolic divisors (Python 7 % -2 == -1, Z3 mod(7, -2) == 1).
+            if not (isinstance(node.right, ast.Constant) and type(node.right.value) is int
+                    and node.right.value > 0):
+                raise NotImplementedError(
+                    "'//' and '%' are only supported with a positive integer literal divisor"
+                )
+            if _is_real(left):
+                raise NotImplementedError("floor division and modulo are not defined over reals")
         op = _OP_MAP.get(type(node.op))
         if op is None:
             raise NotImplementedError(f"Unsupported BinOp: {type(node.op).__name__}")

@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Fixed
+- `code_orchestrator`: checkpoints did not store `code_structure` or `decomposition_plan`, so a loaded checkpoint lost both. They are stored now, with every phase field, and checkpoints written before this change still load.
+- `code_orchestrator`: `Function.callees` and `Function.callers` were never filled, and `dependency_graph` stayed empty. Coverage importance and decomposition ordering therefore ignored the call graph. They are linked now.
+- PyProver `loop_verifier`: `x / 2` was translated as Z3 integer division, which truncates, so Python's real division was not modelled. `/` is real division now. `//` and `%` follow the same rule as `simplify_function`: only a positive integer literal divisor is translated.
+- `python_debug/examples.py` could not run as a script (`debug_report` was not on the path). It adds its own directory to the path now.
+- `API.md` said it was auto-generated. Nothing generates it; it is hand-maintained and the header says so.
+- `MANIFEST.txt` quoted a stale test count. It now points to `pytest`.
+- `ContractSimplifier` now uses `_is_z3_bool` from `contract_verifier` (see the merge review below).
 - `code_orchestrator`: `analyze_codebase()` raised `TypeError` on any input, because `type_stubs.py` defined `Function`, `CodeStructure`, `VerificationState` and other classes with fields that did not match the live code. The live code now imports those names from `types.py`, and `type_stubs.py` is removed. Eleven empty stub classes that shadowed real classes of the same name are removed too. Analysis, recommendation, coverage, reporting and checkpoint serialisation now run end to end.
 - PyProver `ContractSimplifier` imports `_is_z3_bool` from `contract_verifier` instead of keeping its own copy.
 - PyProver `simplify_function` / `verify_function_equivalence`: `%` and `//` were translated to Z3's Euclidean `mod`/`div`, which differ from Python for negative or symbolic divisors (Python `7 % -2 == -1`, Z3 `mod(7, -2) == 1`). `x % -2` was proven equal to `x % 2`. Only a positive integer literal divisor is translated now; anything else is reported as unsupported.
@@ -15,8 +22,13 @@
 - PyProver: code with no contract annotations, a body that is not a single return, a Z3 timeout, or a skipped postcondition now reports `verified: false` with `inconclusive: true`, not a pass. The bridge reports these as INCONCLUSIVE, not FAILED.
 - `fix_verifier`: an inconclusive formal result is treated as "not checked", not as a rejected fix.
 
+### Changed
+
+- `legacy_code/`: four fragments that cannot run were moved to `legacy_code/archive/`. Each is superseded by live code, and `legacy_code/README.md` lists the replacement. Nothing was deleted.
+
 ### Added
 
+- `src/pyprover/tests/test_loop_translator.py`: real division, positive-divisor rule, and rejection of symbolic divisors in the loop translator.
 - `simplify_function` / `verify_function_equivalence` accept more of Python: annotated assignments (`x: int = e`), chained assignment (`a = b = e`), tuple unpacking with equal-length tuples (`a, b = b, a` swaps, with every right-hand side evaluated first), integer powers with a literal exponent from 0 to 16 (rewritten to products), and parameters annotated `bool` (Z3 Booleans, so `if flag:`, `not flag` and `and`/`or` translate). Float parameters stay unsupported because a real-valued equality need not hold for floats. Tests: `src/pyprover/tests/test_simplify_function.py::TestExpandedSubset`, which also renders the translated original and compares it with the source on a grid of inputs.
 - `src/code_orchestrator/tests/test_orchestrator.py`: analysis, invalid input, recommendation, coverage, reporting and checkpoint round trip. One known gap is marked `xfail(strict=True)`: checkpoints do not store `code_structure`
 - `simplify_function` returns `simplified_python`: a Python expression over the function's parameters, checked against the original on a grid of inputs in tests. `None` when the result cannot be rendered, and the Z3 string form is still returned

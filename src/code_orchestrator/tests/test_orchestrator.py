@@ -84,14 +84,35 @@ class TestCheckpoint:
         assert loaded.project_id == analysed.project_id
         assert loaded.functions_total == analysed.functions_total
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Known gap: VerificationStateIO.serialize() does not write "
-               "code_structure or decomposition_plan, so a loaded checkpoint "
-               "has no code structure. Remove this marker when fixed.",
-    )
     def test_round_trip_keeps_code_structure(self, orchestrator, analysed):
         checkpoint = orchestrator.get_state_checkpoint(analysed)
-        loaded, _ = orchestrator.load_checkpoint(checkpoint)
-        assert loaded.code_structure is not None
+        loaded, error = orchestrator.load_checkpoint(checkpoint)
+        assert error is None
         assert {f.name for f in loaded.code_structure.functions} == {"leaf", "top"}
+        assert loaded.code_structure.call_graph == analysed.code_structure.call_graph
+
+    def test_round_trip_keeps_decomposition_plan(self, orchestrator, analysed):
+        checkpoint = orchestrator.get_state_checkpoint(analysed)
+        loaded, _ = orchestrator.load_checkpoint(checkpoint)
+        assert loaded.decomposition_plan == analysed.decomposition_plan
+
+    def test_checkpoint_without_structure_still_loads(self, orchestrator, analysed):
+        """Checkpoints written before the structure field existed must still load."""
+        import json
+        data = json.loads(orchestrator.get_state_checkpoint(analysed))
+        del data["structure"]
+        loaded, error = orchestrator.load_checkpoint(json.dumps(data))
+        assert error is None
+        assert loaded.code_structure is None
+
+
+class TestLinking:
+
+    def test_callers_and_callees_filled(self, analysed):
+        by_name = {f.name: f for f in analysed.code_structure.functions}
+        assert by_name["top"].callees == ["leaf"]
+        assert by_name["leaf"].callers == ["top"]
+        assert by_name["top"].callers == []
+
+    def test_dependency_graph_filled(self, analysed):
+        assert analysed.code_structure.dependency_graph["top"] == ["leaf"]

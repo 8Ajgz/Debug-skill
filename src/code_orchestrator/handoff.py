@@ -1,6 +1,7 @@
 """Stateful handoff protocol for serializing verification state across prompts."""
 
 import json
+from dataclasses import asdict
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -58,6 +59,10 @@ class VerificationStateIO:
                 "blocked_functions": state.blocked_functions
             },
             "tools_run": state.tools_run,
+            "structure": {
+                "code_structure": VerificationStateIO._serialize_code_structure(state.code_structure),
+                "decomposition_plan": VerificationStateIO._serialize_decomposition_plan(state.decomposition_plan),
+            },
             "next_steps": VerificationStateIO._generate_next_steps(state),
             "log": state.verification_log[-5:] if state.verification_log else []  # Last 5 entries
         }
@@ -111,6 +116,13 @@ class VerificationStateIO:
 
             # Restore verification log
             state.verification_log = data.get("log", [])
+
+            # Restore code structure and plan (absent in checkpoints written before this field)
+            structure = data.get("structure", {})
+            state.code_structure = VerificationStateIO._deserialize_code_structure(
+                structure.get("code_structure"))
+            state.decomposition_plan = VerificationStateIO._deserialize_decomposition_plan(
+                structure.get("decomposition_plan"))
 
             return state, None
 
@@ -177,6 +189,73 @@ class VerificationStateIO:
             dependencies_verified=data.get("dependencies_verified", False),
             tools_run=data.get("tools_run", {}),
             timestamp=datetime.fromisoformat(data.get("timestamp", datetime.now().isoformat()))
+        )
+
+    @staticmethod
+    def _serialize_code_structure(structure: Optional[CodeStructure]) -> Optional[dict]:
+        if structure is None:
+            return None
+        return {
+            "functions": [
+                {
+                    "name": f.name,
+                    "module": f.module,
+                    "lines_of_code": f.lines_of_code,
+                    "complexity_score": f.complexity_score,
+                    "callees": f.callees,
+                    "callers": f.callers,
+                    "is_testable": f.is_testable,
+                    "is_verifiable": f.is_verifiable,
+                    "docstring": f.docstring,
+                }
+                for f in structure.functions
+            ],
+            "call_graph": structure.call_graph,
+            "dependency_graph": structure.dependency_graph,
+            "modules": structure.modules,
+            "total_lines": structure.total_lines,
+            "analyzable_percentage": structure.analyzable_percentage,
+            "language": structure.language,
+        }
+
+    @staticmethod
+    def _deserialize_code_structure(data: Optional[dict]) -> Optional[CodeStructure]:
+        if not data:
+            return None
+        return CodeStructure(
+            functions=[Function(**f) for f in data["functions"]],
+            call_graph=data["call_graph"],
+            dependency_graph=data["dependency_graph"],
+            modules=data["modules"],
+            total_lines=data["total_lines"],
+            analyzable_percentage=data["analyzable_percentage"],
+            language=data.get("language", "python"),
+        )
+
+    @staticmethod
+    def _serialize_decomposition_plan(plan: Optional[DecompositionPlan]) -> Optional[dict]:
+        if plan is None:
+            return None
+        return {
+            "phases": [asdict(p) for p in plan.phases],
+            "total_functions": plan.total_functions,
+            "total_lines": plan.total_lines,
+            "estimated_total_tokens": plan.estimated_total_tokens,
+            "strategy": plan.strategy,
+            "coverage_target": plan.coverage_target,
+        }
+
+    @staticmethod
+    def _deserialize_decomposition_plan(data: Optional[dict]) -> Optional[DecompositionPlan]:
+        if not data:
+            return None
+        return DecompositionPlan(
+            phases=[VerificationPhase(**p) for p in data["phases"]],
+            total_functions=data["total_functions"],
+            total_lines=data["total_lines"],
+            estimated_total_tokens=data["estimated_total_tokens"],
+            strategy=data["strategy"],
+            coverage_target=data.get("coverage_target", "100% of analyzable code"),
         )
 
     @staticmethod

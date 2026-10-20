@@ -1,6 +1,6 @@
 # Debug-Suite v2.9.6 – Feature Manifest
 
-**Status:** Production Ready | **Tests:** 482/482 passing in this sandbox, now including the top-level `tests/` directory that `pytest.ini`'s `testpaths` previously excluded from this count entirely (skip count is environment-dependent — reflects which optional tools, e.g. rustc/clang/valgrind, are installed; see CHANGELOG.md [2.9.6])
+**Status:** Production Ready | **Tests:** run `pytest` for the current count (skip count is environment-dependent — reflects which optional tools, e.g. rustc/clang/valgrind, are installed; see CHANGELOG.md [2.9.6])
 
 **Note (2026-07-10):** v2.7.0 is a branch-reconciliation release, merging this branch's v2.6.1 with a sibling v2.5.2 branch that diverged from the same common ancestor. See CHANGELOG.md [2.7.0] and `debug-suite-handoff.md` for the reconciliation detail. Most of the rest of this file predates v2.5.0/v2.6.0/v2.6.1 and was not kept current through several releases - the "Known Limitations" section below still claimed "Phases 5-10 not yet implemented" and "Rust-Debug requires rustc + clippy installed" without noting the honest-degradation fix, both stale as of a 2026-07-09 edit. Corrected the specific stale claims below; the rest of this file (Component Completeness tables predating Phase 5+) has not been fully re-audited line by line - treat CHANGELOG.md and roadmap.md §11-12 as the more current sources of truth for what's actually implemented and verified.
 

@@ -57,6 +57,7 @@ class CodeAnalyzer:
 
         # Second pass: build call graph and dependency graph
         self._build_graphs(tree)
+        self._link_functions()
 
         # Compute complexity scores
         self._compute_complexity_scores(tree)
@@ -113,6 +114,19 @@ class CodeAnalyzer:
                 # Initialize call graph entry
                 self.call_graph[func.name] = []
                 self.dependency_graph[func.name] = []
+
+    def _link_functions(self) -> None:
+        """Fill Function.callees / callers and the dependency graph from the call
+        graph, keeping only calls to functions defined in the analysed code.
+        Without this, callers are always empty (coverage importance scores) and
+        the dependency graph is always empty (decomposition ordering)."""
+        known = {f.name for f in self.functions}
+        for func in self.functions:
+            callees = [c for c in self.call_graph.get(func.name, []) if c in known]
+            func.callees = callees
+            self.dependency_graph[func.name] = list(callees)
+        for func in self.functions:
+            func.callers = [g.name for g in self.functions if func.name in g.callees]
 
     def _build_graphs(self, tree: ast.AST) -> None:
         """Build call graph and dependency graph."""
