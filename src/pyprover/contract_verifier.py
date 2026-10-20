@@ -1,5 +1,6 @@
 """PyProver Phase 2 - Contract verification using Z3 solver"""
 import ast
+import copy
 import re
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
@@ -55,11 +56,14 @@ def _decorator_clauses(code: str) -> List[Tuple[str, str]]:
     return found
 
 
-def _single_return_expr(code: str) -> Optional[ast.expr]:
-    """Return the expression of the only function whose body is ``return <expr>``.
+def _inlined_return_expr(code: str) -> Optional[ast.expr]:
+    """Return the function's result as one expression over its parameters.
 
-    Docstrings are ignored. Any other shape (several functions, statements before
-    the return, no return) returns None, so ``result`` cannot be substituted.
+    Supported body: plain ``name = expr`` or ``name: T = expr`` statements, then a
+    final ``return expr``. Each earlier name is inlined into later ones, so
+    ``y = x * 2; return y + 1`` becomes ``x * 2 + 1``. Docstrings are ignored.
+    Anything else (``if``, loops, calls as statements, subscript or attribute
+    writes, several functions) returns None, so ``result`` cannot be checked.
     """
     try:
         tree = ast.parse(code)
@@ -72,9 +76,37 @@ def _single_return_expr(code: str) -> Optional[ast.expr]:
         s for s in funcs[0].body
         if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))
     ]
-    if len(body) != 1 or not isinstance(body[0], ast.Return):
+    if not body or not isinstance(body[-1], ast.Return) or body[-1].value is None:
         return None
-    return body[0].value
+
+    bindings: Dict[str, ast.expr] = {}
+    for stmt in body[:-1]:
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            target, value = stmt.targets[0].id, stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
+            target, value = stmt.target.id, stmt.value
+        else:
+            return None
+        bindings[target] = _inline_names(value, bindings)
+
+    return _inline_names(body[-1].value, bindings)
+
+
+class _NameInliner(ast.NodeTransformer):
+    def __init__(self, bindings: Dict[str, ast.expr]):
+        self.bindings = bindings
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if isinstance(node.ctx, ast.Load) and node.id in self.bindings:
+            return ast.copy_location(copy.deepcopy(self.bindings[node.id]), node)
+        return node
+
+
+def _inline_names(expr: ast.expr, bindings: Dict[str, ast.expr]) -> ast.expr:
+    """Copy ``expr`` with every bound name replaced by its bound expression."""
+    if not bindings:
+        return expr
+    return _NameInliner(bindings).visit(copy.deepcopy(expr))
 
 
 def _substitute_result(clause: str, return_text: str) -> str:
@@ -474,7 +506,7 @@ class ContractVerifier:
             )
             return result
 
-        return_node = _single_return_expr(code)
+        return_node = _inlined_return_expr(code)
         return_text = ast.unparse(return_node) if return_node is not None else None
         return_src = [return_text] if return_text else []
         env: Dict[str, Any] = {}
@@ -531,6 +563,9 @@ class ContractVerifier:
                 post_unproven.append(clause)
                 result["details"].append(f"  Post '{clause}' — skipped (non-arithmetic), not proven")
                 continue
+            # A constant clause such as ``5 >= 0`` folds to a Python bool, which the solver calls reject.
+            if isinstance(z3_expr, bool):
+                z3_expr = z3.BoolVal(z3_expr)
 
             # Preconditions must imply the postcondition. A postcondition that
             # mentions result is checked with the return expression substituted in.
