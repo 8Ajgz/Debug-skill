@@ -40,9 +40,10 @@ def add(a: int, b: int) -> int:
         assert report.overall_health == "✅ VERIFIED"
         assert report.risk_level.name == "LOW"
 
-    def test_runtime_crash_with_passing_contract_is_conflict_not_verified(self, debugger):
-        """The core bug this fix closes: a passing formal contract must not
-        silently override a real runtime crash found elsewhere."""
+    def test_runtime_crash_with_unprovable_contract_is_not_verified(self, debugger):
+        """A real runtime crash must not be hidden by a contract. This body has
+        more than one statement, so PyProver cannot prove the postcondition and
+        reports inconclusive. The crash must still be the verdict's driver."""
         code = """
 def add(a: int, b: int) -> int:
     # Pre: True
@@ -53,8 +54,9 @@ def add(a: int, b: int) -> int:
 result = add(1, 2)
 """
         report = asyncio.run(debugger.debug_comprehensive(code, language="python"))
-        assert "CONFLICT" in report.overall_health
+        assert report.pyprover_result.get("verified") is False
         assert report.overall_health != "✅ VERIFIED"
+        assert "unhandled_exception" in [i.type for i in report.issues_found]
         assert report.risk_level.name == "HIGH"
 
     def test_conflict_case_issue_is_actually_populated(self, debugger):
@@ -78,15 +80,10 @@ result = add(1, 2)
         unhandled = [i for i in report.issues_found if str(i.type) == "unhandled_exception"]
         assert unhandled[0].severity == "high"
 
-    def test_runtime_issue_with_no_contract_still_surfaces_as_conflict(self, debugger):
-        """PyProver reports verified=True vacuously for code with zero
-        # Pre:/# Post: annotations (confirmed directly: "nothing to check"
-        is reported the same way as "checked and correct"). Combined with a
-        real runtime crash found elsewhere, this is still worth surfacing
-        as CONFLICT rather than plain "issue found" -- a vacuous pass is
-        exactly the kind of thing that could otherwise read as reassuring
-        when it isn't. This is intentional behavior of the fix, not
-        something the fix should suppress."""
+    def test_runtime_issue_with_no_contract_is_not_verified(self, debugger):
+        """Code with zero # Pre:/# Post: annotations used to get verified=True
+        from PyProver, which is a vacuous pass. It is now INCONCLUSIVE, so a
+        runtime crash here surfaces as an issue and nothing reads as VERIFIED."""
         code = """
 def f():
     undefined_name_here
@@ -95,8 +92,8 @@ def f():
 f()
 """
         report = asyncio.run(debugger.debug_comprehensive(code, language="python"))
-        assert report.pyprover_result.get("verified") is True  # vacuous pass, confirmed
-        assert "CONFLICT" in report.overall_health
+        assert report.pyprover_result.get("verified") is False
+        assert report.overall_health != "✅ VERIFIED"
         assert len(report.issues_found) > 0
 
     def test_both_streams_agree_issues_found_no_conflict_wording(self, debugger):

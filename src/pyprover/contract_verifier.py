@@ -55,6 +55,38 @@ def _decorator_clauses(code: str) -> List[Tuple[str, str]]:
     return found
 
 
+def _single_return_expr(code: str) -> Optional[ast.expr]:
+    """Return the expression of the only function whose body is ``return <expr>``.
+
+    Docstrings are ignored. Any other shape (several functions, statements before
+    the return, no return) returns None, so ``result`` cannot be substituted.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    funcs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if len(funcs) != 1:
+        return None
+    body = [
+        s for s in funcs[0].body
+        if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))
+    ]
+    if len(body) != 1 or not isinstance(body[0], ast.Return):
+        return None
+    return body[0].value
+
+
+def _substitute_result(clause: str, return_text: str) -> str:
+    """Replace each result alias in a postcondition with the return expression.
+
+    Textual substitution, so builtins such as ``len(result)`` see the expression
+    too, not only bare names.
+    """
+    pattern = r"\b(?:" + "|".join(sorted(_RESULT_ALIASES)) + r")\b"
+    return re.sub(pattern, f"({return_text})", clause)
+
+
 @dataclass
 class ContractSpec:
     preconditions: List[str]
@@ -419,12 +451,19 @@ class ContractVerifier:
             return result
 
         all_clauses = contract.preconditions + contract.postconditions + contract.invariants
+        # Nothing was checked, so nothing is proven. Reporting True here would
+        # make an unannotated function read as VERIFIED.
         if not all_clauses:
-            result["details"].append("No contract annotations found (add # Pre: / # Post: comments)")
+            result["verified"] = False
+            result["inconclusive"] = True
+            result["details"].append("INCONCLUSIVE: no contract annotations found (add # Pre: / # Post: comments)")
             return result
 
         if not Z3_AVAILABLE:
-            # Structural check only: confirm clauses are non-empty strings
+            # Structural check only: confirm clauses are non-empty strings. That is
+            # not a proof, so it cannot report verified.
+            result["verified"] = False
+            result["inconclusive"] = True
             result["details"].append(
                 "Z3 not available — structural check only (install z3-solver for full verification)"
             )
@@ -435,10 +474,13 @@ class ContractVerifier:
             )
             return result
 
+        return_node = _single_return_expr(code)
+        return_text = ast.unparse(return_node) if return_node is not None else None
+        return_src = [return_text] if return_text else []
         env: Dict[str, Any] = {}
-        seed_real_env(all_clauses, env, float_annotated_params(code))
+        seed_real_env(all_clauses + return_src, env, float_annotated_params(code))
         z3_builtins.seed_string_env(
-            contract.preconditions + contract.postconditions + contract.invariants, env,
+            contract.preconditions + contract.postconditions + contract.invariants + return_src, env,
         )
 
         # ── 1. Precondition satisfiability ────────────────────────────────
@@ -467,58 +509,60 @@ class ContractVerifier:
         # ── 2. Postcondition validity ──────────────────────────────────────
         post_fails: List[str] = []
         post_verified = 0
-        post_skipped = 0
+        post_unproven: List[str] = []
 
         for clause in contract.postconditions:
             references_result = any(alias in clause.lower() for alias in _RESULT_ALIASES)
-            z3_expr = _clause_to_z3(clause, env)
+            if references_result:
+                # Substitute the function's own return expression for ``result`` and
+                # check it like any other postcondition. Without a single return
+                # expression there is nothing to substitute, so the clause stays unproven.
+                if return_text is None:
+                    post_unproven.append(clause)
+                    result["details"].append(
+                        f"  Post '{clause}' — not proven (no single return expression to check result against)"
+                    )
+                    continue
+                z3_expr = _clause_to_z3(_substitute_result(clause, return_text), env)
+            else:
+                z3_expr = _clause_to_z3(clause, env)
 
             if z3_expr is None:
-                post_skipped += 1
-                result["details"].append(f"  Post '{clause}' — skipped (non-arithmetic)")
+                post_unproven.append(clause)
+                result["details"].append(f"  Post '{clause}' — skipped (non-arithmetic), not proven")
                 continue
 
-            if references_result:
-                # Weaker check: postcondition must be satisfiable on its own
-                sat, _ = _check_satisfiable([z3_expr])
-                if not sat:
-                    post_fails.append(
-                        f"'{clause}' is always False (postcondition can never hold)"
-                    )
-                else:
-                    post_verified += 1
-                    result["details"].append(
-                        f"  Post '{clause}' — satisfiable ✓ "
-                        "(references result; implication not checked without execution)"
-                    )
+            # Preconditions must imply the postcondition. A postcondition that
+            # mentions result is checked with the return expression substituted in.
+            verdict, cx = _check_implied(parseable_pre, z3_expr)
+            if verdict == "yes":
+                post_verified += 1
+                result["details"].append(f"  Post '{clause}' — implied by preconditions ✓")
+            elif verdict == "no":
+                post_fails.append(
+                    f"'{clause}' is NOT implied by preconditions "
+                    f"(counterexample: {cx})"
+                )
             else:
-                # Stronger check: preconditions must imply postcondition
-                verdict, cx = _check_implied(parseable_pre, z3_expr)
-                if verdict == "yes":
-                    post_verified += 1
-                    result["details"].append(f"  Post '{clause}' — implied by preconditions ✓")
-                elif verdict == "no":
-                    post_fails.append(
-                        f"'{clause}' is NOT implied by preconditions "
-                        f"(counterexample: {cx})"
-                    )
-                else:
-                    post_skipped += 1
-                    result["details"].append(
-                        f"  Post '{clause}' — Z3 timeout (kept as unverified)"
-                    )
+                post_unproven.append(clause)
+                result["details"].append(
+                    f"  Post '{clause}' — Z3 timeout (kept as unverified)"
+                )
 
         if post_fails:
             result["verified"] = False
             result["postconditions_ok"] = False
             for f in post_fails:
                 result["details"].append(f"FAIL: {f}")
-        elif contract.postconditions:
-            summary = (
-                f"✓ Postconditions: {post_verified} verified"
-                + (f", {post_skipped} skipped" if post_skipped else "")
+        elif post_unproven:
+            # Not a failure, but not proven either. A pass needs proof.
+            result["verified"] = False
+            result["inconclusive"] = True
+            result["details"].append(
+                f"INCONCLUSIVE: {len(post_unproven)} postcondition(s) not proven"
             )
-            result["details"].append(summary)
+        elif contract.postconditions:
+            result["details"].append(f"✓ Postconditions: {post_verified} verified")
 
         # ── 3. Invariant satisfiability ────────────────────────────────────
         for clause in contract.invariants:

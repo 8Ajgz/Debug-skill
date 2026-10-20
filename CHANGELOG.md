@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- PyProver: a postcondition that mentions `result` was reported verified when it was only satisfiable, so a false one such as `Post: result < 0` for `return x * 2` with `Pre: x >= 0` passed. The return expression is now substituted for `result` and the preconditions must imply it. Only a single `return <expr>` body can be checked this way.
+- PyProver: code with no contract annotations, a body that is not a single return, a Z3 timeout, or a skipped postcondition now reports `verified: false` with `inconclusive: true`, not a pass. The bridge reports these as INCONCLUSIVE, not FAILED.
+- `fix_verifier`: an inconclusive formal result is treated as "not checked", not as a rejected fix.
+
 ### Added
 
 - `src/pyprover/verification_cache.py`: SHA256-keyed, bounded LRU cache for `ContractVerifier` results (roadmap 2.1)

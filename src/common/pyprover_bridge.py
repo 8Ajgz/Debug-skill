@@ -292,7 +292,9 @@ class PyProverBridge:
         # A failed verification reports its reason as the last detail entry
         # (e.g. "Z3 solver not available: ..." or "Verification error: ...").
         error = None
-        if not verified and details:
+        # An inconclusive result (nothing proven) is not a failure, so it gets no error
+        # and the bridge reports it as INCONCLUSIVE rather than FAILED.
+        if not verified and details and not raw_result.get("inconclusive"):
             error = details[-1]
         return {
             "verified": verified,

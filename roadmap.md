@@ -57,7 +57,7 @@
 6. Developer tooling (Makefile, ruff, black, pytest-benchmark) and the eight v12.2 example scripts.
 7. Re-run the standardize-skill security audit (roadmap 2.6). Not done.
 8. Silent `except` handlers in `assembly_debug` (`symbolic.py`), `cpp_debug` (`lief_analyzer.py`, `dwarf_analyzer.py`) and `code_orchestrator`. Only `master_debugger` was traced. Check each for a path to a verdict before changing it. `code_orchestrator` is not on the master debugger verdict path (checked 2026-10-19). `LiefBinaryAnalyzer` is exported but not called by the verdict pipeline.
-9. Known gap in the formal check: `_phase_2_formal` derives `verified` from `risk_level == LOW and confidence >= 0.9` on the bridge's result. That mapping was not re-checked against PyProver's own verdict.
+9. CLOSED 2026-10-20: the mapping in `_phase_2_formal` agrees with the bridge. The real defect was upstream: `ContractVerifier.verify_contract` reported verified=True for a false postcondition on `result` (satisfiability only) and for code with no annotations. Fixed in `contract_verifier.py`: the return expression is substituted for `result` when the body is a single `return`, and anything unproven is INCONCLUSIVE. Regression tests in `src/pyprover/tests/test_result_soundness.py`. Limit left open: only single-`return` bodies are modeled, so most multi-statement functions are INCONCLUSIVE until straight-line assignments are substituted too.
 
 **Handoff (for the next instance, written 2026-10-19):**
 

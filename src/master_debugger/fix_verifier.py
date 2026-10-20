@@ -54,7 +54,13 @@ def verify_fix(original_code: str, fixed_code: str, language: str = "python",
         )
 
     after = run(fixed_code, max_examples=max_examples)
-    formal = ContractVerifier.verify_contract(fixed_code)["verified"] if Z3_AVAILABLE else None
+    # None means "not checked formally": Z3 is missing, or PyProver could not prove
+    # the contract either way. Only a real failed proof (False) rejects the fix.
+    formal = None
+    if Z3_AVAILABLE:
+        formal_result = ContractVerifier.verify_contract(fixed_code)
+        if not formal_result.get("inconclusive"):
+            formal = formal_result["verified"]
     fixed_ok = after["status"] == "passed" and formal is not False
 
     if fixed_ok:
