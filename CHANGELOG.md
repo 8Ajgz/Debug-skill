@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Fixed
+- PyProver `simplify_function` / `verify_function_equivalence`: `%` and `//` were translated to Z3's Euclidean `mod`/`div`, which differ from Python for negative or symbolic divisors (Python `7 % -2 == -1`, Z3 `mod(7, -2) == 1`). `x % -2` was proven equal to `x % 2`. Only a positive integer literal divisor is translated now; anything else is reported as unsupported.
+- PyProver `simplify_function`: the rewritten expression is confirmed equal to the original by the solver before it is reported. A rewrite that cannot be confirmed is reported as unsupported.
+- PyProver `simplify_function`: a rewrite is reported only when it has fewer nodes than the original. Z3's term reordering (e.g. `100 + a*50` to `100 + 50*a`) was reported as a simplification.
 - PyProver `ContractSimplifier`: identical clauses were never collapsed, because the redundancy check excluded the other copies by string match. `["n >= 0", "n >= 0"]` kept both. Clauses are now tracked by position, so duplicates collapse to one.
 - PyProver `ContractSimplifier.as_decorators()`: clauses were wrapped in raw double quotes, so `s == "a"` produced `@requires("s == "a"")`, which is not valid Python. Clauses are now emitted as JSON string literals.
 - PyProver `ContractSimplifier`: a bare-identifier or otherwise non-boolean clause that Z3 cannot check was reported under "Z3 timeout". It is now listed separately in `unsupported_clauses` and the summary as "not expressible in Z3, not checked". Clauses that Z3 cannot translate at all are reported there too; before, they were silently kept.
@@ -12,6 +15,8 @@
 
 ### Added
 
+- `simplify_function` returns `simplified_python`: a Python expression over the function's parameters, checked against the original on a grid of inputs in tests. `None` when the result cannot be rendered, and the Z3 string form is still returned
+- `src/pyprover/tests/test_simplify_function.py`: rendered Python matches the original on a grid, `//` and `%` soundness, renderer edge cases, and minimality
 - `src/pyprover/tests/test_contract_simplifier.py`: duplicate collapse, decorator round-trip through `ast`, unsupported-vs-timeout reporting, idempotence, and a Z3 equivalence check that each simplified contract is logically equal to the original
 - `src/pyprover/verification_cache.py`: SHA256-keyed, bounded LRU cache for `ContractVerifier` results (roadmap 2.1)
 - `src/pyprover/parallel_verifier.py`: `batch_verify()` runs contracts in worker processes; Z3 is not thread-safe on its default context

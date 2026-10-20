@@ -82,6 +82,18 @@ def _expr_to_z3_safe(node: ast.expr, env: Dict[str, Any]) -> Any:
     function calls, attribute access) into this module's
     UnsupportedConstructError, so every caller in this file can catch one
     consistent exception type instead of two."""
+    for sub in ast.walk(node):
+        # Z3's div/mod are Euclidean, so they differ from Python's // and %
+        # whenever the divisor is negative or symbolic (Python: 7 % -2 == -1,
+        # Z3 mod(7, -2) == 1). Only a positive literal divisor is safe.
+        if (isinstance(sub, ast.BinOp) and isinstance(sub.op, (ast.FloorDiv, ast.Mod))
+                and not (isinstance(sub.right, ast.Constant)
+                         and type(sub.right.value) is int and sub.right.value > 0)):
+            raise UnsupportedConstructError(
+                "'//' and '%' are only supported with a positive integer literal "
+                "divisor (Z3 uses Euclidean division, which differs from Python "
+                "for negative or symbolic divisors)"
+            )
     try:
         return _expr_to_z3(node, env)
     except NotImplementedError as e:
@@ -118,14 +130,17 @@ class SimplificationResult:
     """Result of simplify_function()."""
     status: str  # "simplified" | "already_simplest" | "unsupported"
     original_expr: Optional[str] = None
-    simplified_expr: Optional[str] = None
+    simplified_expr: Optional[str] = None  # Z3 string form
     reason: Optional[str] = None
+    simplified_python: Optional[str] = None  # runnable Python expression over the same parameter names
 
     def summary(self) -> str:
         if self.status == "unsupported":
             return f"Cannot simplify — unsupported construct: {self.reason}"
         if self.status == "already_simplest":
             return f"No algebraic simplification found: {self.original_expr}"
+        if self.simplified_python is not None:
+            return f"{self.original_expr}  =>  {self.simplified_python}"
         return f"{self.original_expr}  =>  {self.simplified_expr}"
 
 
@@ -406,6 +421,71 @@ def verify_function_equivalence(
     return result
 
 
+_Z3_PY_BINARY = {
+    "+": "+", "-": "-", "*": "*", "/": "/", "div": "//", "mod": "%",
+    "<": "<", "<=": "<=", ">": ">", ">=": ">=", "=": "==", "distinct": "!=",
+}
+
+
+def _z3_to_python(expr: Any, names: Optional[frozenset] = None) -> str:
+    """Render a Z3 expression as Python source over the same parameter names.
+
+    `names` is the set of parameter names the output may refer to. A free
+    symbol outside it (e.g. the stand-in Z3 uses for len(x)) cannot be
+    rendered, so it raises instead of producing an unbound name.
+
+    Raises UnsupportedConstructError for any Z3 node this does not handle, so
+    the caller can fall back to the Z3 string form instead of emitting wrong code.
+    """
+    if z3.is_string_value(expr):
+        return repr(expr.as_string())
+    if z3.is_true(expr):
+        return "True"
+    if z3.is_false(expr):
+        return "False"
+    if z3.is_int_value(expr):
+        v = expr.as_long()
+        return f"({v})" if v < 0 else str(v)
+    if z3.is_rational_value(expr):
+        num, den = expr.numerator_as_long(), expr.denominator_as_long()
+        return f"({num}/{den})"
+    if z3.is_const(expr):
+        symbol = expr.decl().name()
+        if names is not None and symbol not in names:
+            raise UnsupportedConstructError(f"symbol '{symbol}' is not a parameter")
+        return symbol
+
+    name = expr.decl().name()
+    args = [_z3_to_python(expr.arg(i), names) for i in range(expr.num_args())]
+    if name == "to_real" and len(args) == 1:
+        return args[0]
+    if name == "if" and len(args) == 3:
+        return f"({args[1]} if {args[0]} else {args[2]})"
+    if name == "not" and len(args) == 1:
+        return f"(not {args[0]})"
+    if name in ("and", "or") and args:
+        return "(" + f" {name} ".join(args) + ")"
+    if name == "-" and len(args) == 1:
+        return f"(-{args[0]})"
+    if name in ("+", "*") and len(args) >= 2:   # Z3 sums and products are n-ary
+        return "(" + f" {name} ".join(args) + ")"
+    if name in _Z3_PY_BINARY and len(args) == 2:
+        return f"({args[0]} {_Z3_PY_BINARY[name]} {args[1]})"
+    raise UnsupportedConstructError(f"no Python rendering for Z3 operator '{name}'")
+
+
+def _z3_size(expr: Any, memo: Optional[Dict[int, int]] = None) -> int:
+    """Number of nodes in the expression as a tree (a shared sub-term is counted
+    at each place it appears). Memoised per sub-term, so DAG-shaped Z3 terms
+    are measured in linear time."""
+    if memo is None:
+        memo = {}
+    key = expr.get_id()
+    if key not in memo:
+        memo[key] = 1 + sum(_z3_size(expr.arg(i), memo) for i in range(expr.num_args()))
+    return memo[key]
+
+
 def simplify_function(
     code: str,
     func_name: str,
@@ -451,13 +531,31 @@ def simplify_function(
     original_str = str(original)
     simplified_str = str(simplified)
 
-    if original_str == simplified_str:
+    # Z3 also reorders terms, e.g. "100 + a*50" becomes "100 + 50*a", which is
+    # not a simplification. Only a result with fewer nodes is reported.
+    if original_str == simplified_str or _z3_size(simplified) >= _z3_size(original):
         return SimplificationResult(status="already_simplest", original_expr=original_str)
+
+    # Safety net: the rewrite is only reported if the solver confirms it is
+    # equal to the original for every input. Anything else is not a simplification.
+    proof = _prove_equal(original, simplified)
+    if proof.status != "decided" or not proof.equivalent:
+        return SimplificationResult(
+            status="unsupported",
+            original_expr=original_str,
+            reason=f"simplified form could not be confirmed equal to the original ({proof.summary()})",
+        )
+
+    try:
+        simplified_python = _z3_to_python(simplified, frozenset(a.arg for a in node.args.args))
+    except UnsupportedConstructError:
+        simplified_python = None
 
     return SimplificationResult(
         status="simplified",
         original_expr=original_str,
         simplified_expr=simplified_str,
+        simplified_python=simplified_python,
     )
 
 
