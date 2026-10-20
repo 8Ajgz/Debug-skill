@@ -238,3 +238,25 @@ class TestExpandedSubset:
         a = "def f(x):\n    return x ** 2\n"
         b = "def g(x):\n    return x * x\n"
         assert verify_function_equivalence(a, "f", b, "g").equivalent is True
+
+
+class TestConstantReturns:
+    """A body that returns a literal has no Z3 term to start from. It used to
+    fail in z3.simplify() with "Z3 expression expected"."""
+
+    @pytest.mark.parametrize("code", [
+        "def f(x):\n    return 1\n",
+        "def f(x):\n    return True\n",
+        "def f(x):\n    return 'a'\n",
+    ])
+    def test_constant_return_is_handled(self, code):
+        r = simplify_function(code, "f")
+        assert r.status in ("already_simplest", "simplified"), r.summary()
+
+    def test_constant_return_equivalence(self):
+        r = verify_function_equivalence("def f(x):\n    return 1\n", "f",
+                                        "def g(x):\n    return 1\n", "g")
+        assert r.equivalent is True
+        r = verify_function_equivalence("def f(x):\n    return 1\n", "f",
+                                        "def g(x):\n    return 2\n", "g")
+        assert r.equivalent is False

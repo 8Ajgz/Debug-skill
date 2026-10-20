@@ -656,7 +656,7 @@ def _function_to_symbolic(
         raise UnsupportedConstructError(
             "function does not return a value on every path"
         )
-    return flow[1]
+    return _as_z3_value(flow[1])  # a constant-only body yields a Python literal
 
 
 # ---------------------------------------------------------------------------

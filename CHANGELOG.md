@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- `simplify_function` / `verify_function_equivalence`: a body that returns a literal (`return 1`) failed with "Z3 expression expected", because the translator returned a Python int. It is wrapped in a Z3 term now. `return True` already worked.
 - `simplify_function`: a translator `TypeError`, `ValueError` or `AttributeError` (e.g. a string operator) is reported as unsupported, not raised.
 - `code_orchestrator`: checkpoints did not store `code_structure` or `decomposition_plan`, so a loaded checkpoint lost both. They are stored now, with every phase field, and checkpoints written before this change still load.
 - `code_orchestrator`: `Function.callees` and `Function.callers` were never filled, and `dependency_graph` stayed empty. Coverage importance and decomposition ordering therefore ignored the call graph. They are linked now.
