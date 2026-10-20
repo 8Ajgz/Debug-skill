@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Fixed
+- `code_orchestrator`: `analyze_codebase()` raised `TypeError` on any input, because `type_stubs.py` defined `Function`, `CodeStructure`, `VerificationState` and other classes with fields that did not match the live code. The live code now imports those names from `types.py`, and `type_stubs.py` is removed. Eleven empty stub classes that shadowed real classes of the same name are removed too. Analysis, recommendation, coverage, reporting and checkpoint serialisation now run end to end.
+- PyProver `ContractSimplifier` imports `_is_z3_bool` from `contract_verifier` instead of keeping its own copy.
 - PyProver `simplify_function` / `verify_function_equivalence`: `%` and `//` were translated to Z3's Euclidean `mod`/`div`, which differ from Python for negative or symbolic divisors (Python `7 % -2 == -1`, Z3 `mod(7, -2) == 1`). `x % -2` was proven equal to `x % 2`. Only a positive integer literal divisor is translated now; anything else is reported as unsupported.
 - PyProver `simplify_function`: the rewritten expression is confirmed equal to the original by the solver before it is reported. A rewrite that cannot be confirmed is reported as unsupported.
 - PyProver `simplify_function`: a rewrite is reported only when it has fewer nodes than the original. Z3's term reordering (e.g. `100 + a*50` to `100 + 50*a`) was reported as a simplification.
@@ -15,6 +17,7 @@
 
 ### Added
 
+- `src/code_orchestrator/tests/test_orchestrator.py`: analysis, invalid input, recommendation, coverage, reporting and checkpoint round trip. One known gap is marked `xfail(strict=True)`: checkpoints do not store `code_structure`
 - `simplify_function` returns `simplified_python`: a Python expression over the function's parameters, checked against the original on a grid of inputs in tests. `None` when the result cannot be rendered, and the Z3 string form is still returned
 - `src/pyprover/tests/test_simplify_function.py`: rendered Python matches the original on a grid, `//` and `%` soundness, renderer edge cases, and minimality
 - `src/pyprover/tests/test_contract_simplifier.py`: duplicate collapse, decorator round-trip through `ast`, unsupported-vs-timeout reporting, idempotence, and a Z3 equivalence check that each simplified contract is logically equal to the original

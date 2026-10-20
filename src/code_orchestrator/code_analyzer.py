@@ -3,7 +3,7 @@
 import ast
 from typing import Dict, List, Optional, Set
 
-from .type_stubs import CodeStructure, Function, OperationError, OperationErrorType
+from .types import CodeStructure, Function, OperationError, OperationErrorType
 
 
 class CodeAnalyzer:

@@ -1,6 +1,6 @@
 """Coverage tracking and unified metrics reporting."""
 
-from .type_stubs import (
+from .types import (
     CodeStructure,
     CoverageReport,
     ToolCoverage,

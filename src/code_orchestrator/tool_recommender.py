@@ -1,6 +1,6 @@
 """Tool recommender for selecting next verification tool based on state."""
 
-from .type_stubs import ToolRecommendation, VerificationState
+from .types import ToolRecommendation, VerificationState
 
 
 class ToolRecommender:

@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from typing import Optional, Tuple
 
-from .type_stubs import (
+from .types import (
     CodeStructure,
     DecompositionPlan,
     Function,

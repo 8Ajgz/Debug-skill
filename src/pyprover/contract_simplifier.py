@@ -40,7 +40,7 @@ except ImportError:
     Z3_AVAILABLE = False
 
 from . import z3_builtins
-from .contract_verifier import _conditional_parts, _expr_to_z3, seed_real_env
+from .contract_verifier import _conditional_parts, _expr_to_z3, _is_z3_bool, seed_real_env
 
 
 # ---------------------------------------------------------------------------
@@ -150,21 +150,6 @@ def _clause_to_z3(clause_str: str, env: Dict[str, Any]) -> Optional[Any]:
 # ---------------------------------------------------------------------------
 # Core implication check
 # ---------------------------------------------------------------------------
-
-def _is_z3_bool(expr: Any) -> bool:
-    """True if expr is a Z3 Boolean-sorted expression (safe to Solver.add()/Not()).
-
-    A bare identifier clause (e.g. an ensures-clause of just "result", no
-    comparison) parses via `_expr_to_z3`'s `ast.Name` branch to a Z3 Int,
-    not a predicate. z3.Not() and Solver.add() both raise Z3Exception on a
-    non-Bool sort, so any call site that might receive a bare-identifier
-    clause must check this first.
-    """
-    try:
-        return expr.sort_kind() == z3.Z3_BOOL_SORT
-    except Exception:
-        return False
-
 
 def _implies(antecedent_clauses: List[Any], consequent: Any, timeout_ms: int) -> str:
     """Check if ∧(antecedent_clauses) → consequent.
