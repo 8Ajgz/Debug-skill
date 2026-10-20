@@ -116,7 +116,7 @@ class TestIsinstance:
 
 class TestAnnotations:
 
-    @pytest.mark.parametrize("ann", ["Any", "set[int]", "Foo"])
+    @pytest.mark.parametrize("ann", ["set[int]", "Foo"])
     def test_unmodelled_annotation_rejected(self, ann):
         r = simplify_function(f"def f(x: {ann}):\n    return x\n", "f")
         assert r.status == "unsupported"

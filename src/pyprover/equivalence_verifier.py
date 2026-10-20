@@ -221,12 +221,22 @@ _UNBOUND = _Unbound()
 class _Seq:
     length: Any  # Z3 Int
     items: Any   # Z3 Array(Int, Int)
+    opaque: bool = False  # elements are Any values: the array is a placeholder, never read
 
 
 @dataclass(frozen=True)
 class _Map:
     present: Any  # Z3 Array(Int, Bool)
     values: Any   # Z3 Array(Int, Int)
+    opaque: bool = False  # values are Any values: the array is a placeholder, never read
+
+
+@dataclass(frozen=True)
+class _AnyValue:
+    """A value of type Any: an arbitrary Python object, of which nothing is known. It can be
+    passed on unchanged, and tested against None (through the _Opt that holds it). Any
+    other use of it, such as an attribute, an operator, or equality, is not modelled."""
+    name: str
 
 
 @dataclass(frozen=True)
@@ -325,6 +335,12 @@ _DEFAULTS = {"int": lambda: z3.IntVal(0), "str": lambda: z3.StringVal(""), "floa
              "bool": lambda: z3.BoolVal(False)}
 
 
+def _is_any_annotation(node: ast.expr) -> bool:
+    """`Any`, or `typing.Any`."""
+    return (isinstance(node, ast.Name) and node.id == "Any") or (
+        isinstance(node, ast.Attribute) and node.attr == "Any")
+
+
 def _sort_name(node: ast.expr) -> Optional[str]:
     return node.id if isinstance(node, ast.Name) and node.id in _SORTS else None
 
@@ -348,13 +364,19 @@ def _param_kind(arg: ast.arg, body: Optional[List[ast.stmt]] = None, scope: Any 
     ann = arg.annotation
     if isinstance(ann, ast.Name) and ann.id in ("int", "str", "float"):
         return ann.id
+    if _is_any_annotation(ann):
+        # An Any value is opaque, so a parameter the body never reads cannot change the result.
+        return "any" if body is None or _reads_name(body, arg.arg) else "unused"
     if isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name):
         base, sl = ann.value.id, ann.slice
-        if base in ("list", "List") and _sort_name(sl):
-            return ("list", _sort_name(sl))
+        if base in ("list", "List") and (_sort_name(sl) or _is_any_annotation(sl)):
+            return ("list", _sort_name(sl) or "any")
         if (base in ("dict", "Dict") and isinstance(sl, ast.Tuple) and len(sl.elts) == 2
-                and _sort_name(sl.elts[0]) in ("int", "str") and _sort_name(sl.elts[1])):
-            return ("dict", _sort_name(sl.elts[0]), _sort_name(sl.elts[1]))
+                and _sort_name(sl.elts[0]) in ("int", "str")
+                and (_sort_name(sl.elts[1]) or _is_any_annotation(sl.elts[1]))):
+            return ("dict", _sort_name(sl.elts[0]), _sort_name(sl.elts[1]) or "any")
+        if base == "Optional" and _is_any_annotation(sl):
+            return "any"
         if base == "Optional" and _sort_name(sl) in ("int", "str", "bool", "float"):
             return ("opt", _sort_name(sl))
     if (isinstance(ann, ast.BinOp) and isinstance(ann.op, ast.BitOr)):
@@ -396,6 +418,12 @@ def _reads_name(body: List[ast.stmt], name: str) -> bool:
                for n in ast.walk(ast.Module(body=list(body), type_ignores=[])))
 
 
+def _element_sort(name: str) -> Any:
+    """The Z3 sort of container elements. An Any element has a placeholder sort, which no
+    read uses (reads of an opaque container are rejected)."""
+    return z3.IntSort() if name == "any" else _SORTS[name]()
+
+
 def _make_param(kind: Any, name: str, facts: Optional[List[Any]] = None, scope: Any = None) -> Any:
     """The symbolic value of a parameter of this kind. An enum or an object needs
     `facts` (its domain is recorded there) and, for an object, the `scope` its class
@@ -411,6 +439,9 @@ def _make_param(kind: Any, name: str, facts: Optional[List[Any]] = None, scope: 
         return _class_object(kind[1], f"{name}.", scope, facts)
     if kind == "unused":
         return z3.Int(name)  # never read, so its value does not matter
+    if kind == "any":
+        # Any may be None, so the value is an _Opt whose None flag is a Z3 Bool.
+        return _Opt(z3.Bool(name + "__none"), _AnyValue(name + "__val"))
     if kind == "bool":
         return z3.Bool(name)
     if kind == "str":
@@ -421,11 +452,13 @@ def _make_param(kind: Any, name: str, facts: Optional[List[Any]] = None, scope: 
         return _Opt(z3.Bool(name + "__none"), _make_param(kind[1], name + "__val"))
     if isinstance(kind, tuple) and kind[0] == "list":
         return _Seq(z3.Int(name + "__len"),
-                    z3.Array(name + "__items", z3.IntSort(), _SORTS[kind[1]]()))
+                    z3.Array(name + "__items", z3.IntSort(), _element_sort(kind[1])),
+                    opaque=kind[1] == "any")
     if isinstance(kind, tuple) and kind[0] == "dict":
-        key, val = _SORTS[kind[1]](), _SORTS[kind[2]]()
+        key, val = _SORTS[kind[1]](), _element_sort(kind[2])
         return _Map(z3.Array(name + "__present", key, z3.BoolSort()),
-                    z3.Array(name + "__values", key, val))
+                    z3.Array(name + "__values", key, val),
+                    opaque=kind[2] == "any")
     return z3.Int(name)
 
 
@@ -466,12 +499,16 @@ def _merge_envs(cond: Any, then_env: Dict[str, Any], else_env: Dict[str, Any],
             merged[name] = _UNBOUND
         elif isinstance(tv, _Opaque) or isinstance(ev, _Opaque):
             merged[name] = _OPAQUE
+        elif isinstance(tv, _Opt) and isinstance(ev, _Opt) and isinstance(tv.value, _AnyValue):
+            if tv.value != ev.value:
+                raise UnsupportedConstructError(f"'{name}' is an Any value that the two branches bind differently")
+            merged[name] = _Opt(z3.If(cond, tv.isnone, ev.isnone), tv.value)
         elif isinstance(tv, _Opt) and isinstance(ev, _Opt):
             merged[name] = _Opt(z3.If(cond, tv.isnone, ev.isnone), z3.If(cond, tv.value, ev.value))
-        elif isinstance(tv, _Seq) and isinstance(ev, _Seq):
-            merged[name] = _Seq(z3.If(cond, tv.length, ev.length), z3.If(cond, tv.items, ev.items))
-        elif isinstance(tv, _Map) and isinstance(ev, _Map):
-            merged[name] = _Map(z3.If(cond, tv.present, ev.present), z3.If(cond, tv.values, ev.values))
+        elif isinstance(tv, _Seq) and isinstance(ev, _Seq) and tv.opaque == ev.opaque:
+            merged[name] = _Seq(z3.If(cond, tv.length, ev.length), z3.If(cond, tv.items, ev.items), tv.opaque)
+        elif isinstance(tv, _Map) and isinstance(ev, _Map) and tv.opaque == ev.opaque:
+            merged[name] = _Map(z3.If(cond, tv.present, ev.present), z3.If(cond, tv.values, ev.values), tv.opaque)
         elif isinstance(tv, _Enum) and isinstance(ev, _Enum) and tv.classdef is ev.classdef:
             merged[name] = _Enum(tv.classdef, z3.If(cond, tv.term, ev.term))
         elif isinstance(tv, _Record) and isinstance(ev, _Record) and tv.classdef is ev.classdef:
@@ -565,9 +602,11 @@ def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
     if isinstance(stmt.iter, ast.Name):
         seq = env[stmt.iter.id]
         element = True   # the target takes seq.items[k]
+        if seq.opaque:
+            raise UnsupportedConstructError("iterating a list of Any values is not modelled")
     else:
         seq = env[stmt.iter.args[0].args[0].id]
-        element = False  # the target takes the index k
+        element = False  # the target takes the index k, which uses the length alone
 
     facts = env.setdefault(_FACTS_KEY, [])
     facts.append(seq.length <= max_unroll)
@@ -1025,24 +1064,41 @@ class _ContainerRewriter(ast.NodeTransformer):
             if value is None or value.classdef is not kind[1]:
                 raise UnsupportedConstructError("an enum parameter needs a value of the same enum")
             return value
+        if kind == "any":
+            return self._any_argument(node)
         if isinstance(kind, tuple) and kind[0] == "list":
             if isinstance(node, ast.List):
+                if kind[1] == "any":
+                    raise UnsupportedConstructError("a list literal of Any values is not modelled")
                 return _list_literal_value(node, self.env)
-            if isinstance(self._container(node), _Seq):
-                return self._container(node)
-            raise UnsupportedConstructError("a list parameter needs a list")
+            c = self._container(node)
+            if isinstance(c, _Seq) and c.opaque == (kind[1] == "any"):
+                return c
+            raise UnsupportedConstructError("a list parameter needs a list of the same element type")
         if isinstance(kind, tuple) and kind[0] == "dict":
-            if isinstance(self._container(node), _Map):
-                return self._container(node)
-            raise UnsupportedConstructError("a dict parameter needs a dict")
+            c = self._container(node)
+            if isinstance(c, _Map) and c.opaque == (kind[2] == "any"):
+                return c
+            raise UnsupportedConstructError("a dict parameter needs a dict of the same value type")
         if isinstance(kind, tuple) and kind[0] == "opt":
             if isinstance(node, ast.Constant) and node.value is None:
                 return _Opt(z3.BoolVal(True), _DEFAULTS[kind[1]]())
             if isinstance(node, ast.Name) and isinstance(self.env.get(node.id), _Opt):
+                if isinstance(self.env[node.id].value, _AnyValue):
+                    raise UnsupportedConstructError("an Any value cannot be passed for an Optional parameter of a scalar type")
                 return self.env[node.id]
             term = _coerce(_as_z3_value(_expr_to_z3_safe(node, self.env)), kind[1])
             return _Opt(z3.BoolVal(False), term)
         return _coerce(_as_z3_value(_expr_to_z3_safe(node, self.env)), kind)
+
+    def _any_argument(self, node: ast.expr) -> Any:
+        """The value passed for an Any parameter: an Any value passed on unchanged, or None."""
+        if isinstance(node, ast.Name) and isinstance(self.env.get(node.id), _Opt) and isinstance(
+                self.env[node.id].value, _AnyValue):
+            return self.env[node.id]
+        if isinstance(node, ast.Constant) and node.value is None:
+            return _Opt(z3.BoolVal(True), _AnyValue("None"))
+        raise UnsupportedConstructError("an Any parameter takes an Any value unchanged, or None")
 
     def _default(self, kind: Any, node: ast.expr) -> Any:
         """The value of a parameter the call leaves to its default, which must be a literal,
@@ -1052,6 +1108,10 @@ class _ContainerRewriter(ast.NodeTransformer):
             if value is None or value.classdef is not kind[1]:
                 raise UnsupportedConstructError("an enum default must be a member of that enum")
             return value
+        if kind == "any":
+            if isinstance(node, ast.Constant) and node.value is None:
+                return _Opt(z3.BoolVal(True), _AnyValue("None"))
+            raise UnsupportedConstructError("an Any default is only modelled as None")
         if not isinstance(node, ast.Constant):
             raise UnsupportedConstructError("only a literal default value is modelled")
         if isinstance(kind, tuple) and kind[0] == "opt":
@@ -1247,6 +1307,9 @@ class _ContainerRewriter(ast.NodeTransformer):
                 "which is not modelled")
         if isinstance(self.env.get(node.id), _Opt):
             opt = self.env[node.id]
+            if isinstance(opt.value, _AnyValue):
+                raise UnsupportedConstructError(
+                    f"'{node.id}' is an Any value, which is only modelled in a None test or passed on unchanged")
             _guard(self.env, z3.Not(opt.isnone), f"value of '{node.id}' (may be None)", "type")
             return self._bind(opt.value)
         if isinstance(self.env.get(node.id), (_Seq, _Map)):
@@ -1260,6 +1323,9 @@ class _ContainerRewriter(ast.NodeTransformer):
         c = self._container(node.value)
         if c is None:
             return self.generic_visit(node)
+        if c.opaque:
+            raise UnsupportedConstructError(
+                f"an element of '{node.value.id}', a container of Any values, is not modelled")
         index = _expr_to_z3_safe(self.visit(node.slice), self.env)
         if isinstance(c, _Seq):
             i = _as_key_term(index, z3.IntSort())
