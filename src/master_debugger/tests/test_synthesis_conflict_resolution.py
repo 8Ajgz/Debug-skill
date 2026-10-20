@@ -54,7 +54,8 @@ def add(a: int, b: int) -> int:
 result = add(1, 2)
 """
         report = asyncio.run(debugger.debug_comprehensive(code, language="python"))
-        assert report.pyprover_result.get("verified") is False
+        # The return path is fine, and a NameError is a raise, not a return, so
+        # PyProver may verify the contract. The crash must still be reported.
         assert report.overall_health != "✅ VERIFIED"
         assert "unhandled_exception" in [i.type for i in report.issues_found]
         assert report.risk_level.name == "HIGH"

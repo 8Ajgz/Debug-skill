@@ -269,7 +269,7 @@ def f(a, b):
     assert result.get("inconclusive") is True
 
 
-def test_attribute_write_is_inconclusive():
+def test_attribute_write_to_one_object_is_modelled():
     code = """
 def f(obj):
     # Pre: obj.n >= 0
@@ -277,12 +277,23 @@ def f(obj):
     obj.n = -1
     return 5
 """
+    assert _verify(code)["verified"] is True
+
+
+def test_attribute_write_is_seen_by_later_reads():
+    code = """
+def f(obj):
+    # Pre: obj.n >= 0
+    # Post: result >= 0
+    obj.n = -1
+    return obj.n
+"""
     result = _verify(code)
     assert result["verified"] is False
     assert result.get("inconclusive") is True
 
 
-def test_impure_call_statement_is_inconclusive():
+def test_call_statement_that_mutates_nothing_tracked_is_modelled():
     code = """
 def f(x):
     # Pre: x >= 0
@@ -290,9 +301,7 @@ def f(x):
     print(x)
     return x
 """
-    result = _verify(code)
-    assert result["verified"] is False
-    assert result.get("inconclusive") is True
+    assert _verify(code)["verified"] is True
 
 
 def test_pure_builtin_call_statement_is_skipped():

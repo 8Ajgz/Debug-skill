@@ -150,7 +150,7 @@ def f(n):
     assert _verify(code)["verified"] is True
 
 
-def test_return_inside_loop_is_unproven():
+def test_return_inside_loop_is_judged_under_the_invariant():
     code = """
 def f(n):
     # Pre: n >= 0
@@ -162,9 +162,39 @@ def f(n):
         i = i + 1
     return 0
 """
+    assert _verify(code)["verified"] is True
+
+
+def test_return_inside_loop_without_invariant_is_unproven():
+    code = """
+def f(n):
+    # Pre: n >= 0
+    # Post: result >= 0
+    i = 0
+    while i < n:
+        return i
+        i = i + 1
+    return 0
+"""
     result = _verify(code)
     assert result["verified"] is False
     assert result.get("inconclusive") is True
+
+
+def test_return_inside_loop_with_false_claim_fails_post():
+    code = """
+def f(n):
+    # Pre: n >= 0
+    # Post: result >= 1
+    i = 0
+    # Invariant: i >= 0
+    while i < n:
+        return i
+        i = i + 1
+    return 1
+"""
+    result = _verify(code)
+    assert result["verified"] is False
 
 
 def test_bare_array_use_is_not_verified():
@@ -195,17 +225,18 @@ def f(n):
     assert result.get("inconclusive") is True
 
 
-def test_loop_body_with_an_unmodelled_call_is_unproven():
+def test_call_in_loop_body_havocs_what_it_can_change():
     code = """
-def f(n):
-    # Pre: n >= 0
-    # Post: result >= 0
+def f(arr):
+    # Pre: len(arr) > 0
+    # Post: result == 5
     i = 0
-    # Invariant: i >= 0
-    while i < n:
-        print(i)
+    # Invariant: i >= 0 and i <= len(arr) and (i == 0 or arr[0] == 5)
+    while i < len(arr):
+        helper(arr)
+        arr[i] = 5
         i = i + 1
-    return i
+    return arr[0]
 """
     result = _verify(code)
     assert result["verified"] is False
@@ -242,3 +273,99 @@ def f(n):
     result = _verify(code)
     assert result["verified"] is False
     assert not any(d.startswith("FAIL") for d in result["details"])
+
+
+def test_for_index_is_visible_in_the_invariant():
+    code = """
+def f(n):
+    # Pre: n >= 0
+    # Post: result == n
+    total = 0
+    # Invariant: total == i and i <= n
+    for i in range(n):
+        total = total + 1
+    return total
+"""
+    assert _verify(code)["verified"] is True
+
+
+def test_for_index_invariant_must_be_inductive():
+    code = """
+def f(n):
+    # Pre: n >= 0
+    # Post: result == n
+    total = 0
+    # Invariant: total == 0 and i <= n
+    for i in range(n):
+        total = total + 1
+    return total
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result.get("inconclusive") is True
+
+
+def test_attribute_loop_with_invariant():
+    code = """
+def f(obj, n):
+    # Pre: n >= 0 and obj.count == 0
+    # Post: result == n
+    i = 0
+    # Invariant: obj.count == i and i <= n
+    while i < n:
+        obj.count = obj.count + 1
+        i = i + 1
+    return obj.count
+"""
+    assert _verify(code)["verified"] is True
+
+
+def test_writes_to_two_objects_are_unproven():
+    code = """
+def f(a, b):
+    # Pre: a.n >= 0 and b.n >= 0
+    # Post: result >= 0
+    a.n = -1
+    return b.n
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result.get("inconclusive") is True
+
+
+def test_call_that_mutates_a_global_is_not_trusted():
+    code = """
+def f(x):
+    # Pre: x >= 0
+    # Post: result >= 0
+    bump()
+    return counter
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result.get("inconclusive") is True
+
+
+def test_fall_through_that_cannot_happen_is_fine():
+    code = """
+def f(x):
+    # Post: result >= 0
+    if x >= 0:
+        return x
+    if x < 0:
+        return -x
+"""
+    assert _verify(code)["verified"] is True
+
+
+def test_reachable_fall_through_is_unproven():
+    code = """
+def f(x):
+    # Pre: x >= 0
+    # Post: result >= 0
+    if x > 0:
+        return x
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result.get("inconclusive") is True

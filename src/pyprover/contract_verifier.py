@@ -2,7 +2,7 @@
 import ast
 import copy
 import re
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Set, Tuple
 from dataclasses import dataclass
 
 # Z3 import with graceful fallback
@@ -27,6 +27,8 @@ _Z3_TIMEOUT_MS = 3000
 # Variables that refer to the function's return value in post-conditions.
 # We treat these as unconstrained Z3 integers when verifying.
 _RESULT_ALIASES = frozenset({"result", "return", "retval", "ret", "output"})
+# Key that marks an evaluation environment as one where object attributes are modelled.
+MODEL_ATTRIBUTES = "__model_attributes__"
 
 
 class ContractInputTooLargeError(ValueError):
@@ -241,6 +243,74 @@ def _mentions_result(clause: str) -> bool:
     return any(alias in clause.lower() for alias in _RESULT_ALIASES)
 
 
+def _numeric_operands(node: ast.AST) -> Set[str]:
+    """Names used directly as an operand of arithmetic or a comparison."""
+    if isinstance(node, ast.BinOp):
+        operands = [node.left, node.right]
+    elif isinstance(node, ast.UnaryOp):
+        operands = [node.operand]
+    elif isinstance(node, ast.Compare):
+        operands = [node.left, *node.comparators]
+    else:
+        return set()
+    return {operand.id for operand in operands if isinstance(operand, ast.Name)}
+
+
+def _valueless_bare_params(code: str, clauses: List[str]) -> Set[str]:
+    """Parameters the result passes through bare, with no sign they are numbers.
+
+    The inliner treats a bare parameter as a number. That is right when the code or a
+    clause uses it in arithmetic or a comparison. It is wrong for a list or object
+    that is only returned or copied, as in ``return arr`` with ``Pre: len(arr) > 0``.
+    A postcondition that compares ``result`` with a value is taken as evidence that
+    the result is numeric. Such parameters make the result unjudgeable.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return set()
+    funcs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if len(funcs) != 1:
+        return set()
+    func = funcs[0]
+    params = {a.arg for a in func.args.args}
+    passed: Set[str] = set()
+    numeric: Set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Name):
+            passed.add(node.value.id)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Name):
+            passed.add(node.value.id)
+        numeric |= _numeric_operands(node)
+    result_is_numeric = False
+    result_is_sequence = False
+    for clause in clauses:
+        try:
+            expr = ast.parse(clause, mode="eval").body
+        except SyntaxError:
+            continue
+        for node in ast.walk(expr):
+            operands = _numeric_operands(node)
+            numeric |= operands
+            if operands & _RESULT_ALIASES:
+                result_is_numeric = True
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "len"
+                and len(node.args) == 1
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id in _RESULT_ALIASES
+            ):
+                result_is_sequence = True
+    if result_is_numeric:
+        numeric |= passed
+    if result_is_sequence:
+        # len(result) only makes sense for a sequence, so a returned parameter is not a number.
+        return set()
+    return (passed & params) - numeric
+
+
 def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
     """Recursively convert an AST expression node to a Z3 expression."""
     if isinstance(node, ast.Constant):
@@ -307,6 +377,15 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
             length = _length_const(node.value.id, env)
             return z3.Select(env[node.value.id], normalized_index(index, length))
         raise NotImplementedError("subscript of a value that is not a parameter array")
+    if isinstance(node, ast.Attribute):
+        # Only the verifiers that model object state set this marker, so other
+        # users of the shared evaluator still treat attribute access as unsupported.
+        if env.get(MODEL_ATTRIBUTES) and isinstance(node.value, ast.Name):
+            key = f"{node.value.id}.{node.attr}"
+            if key not in env:
+                env[key] = z3.Int(f"{node.value.id}__{node.attr}")
+            return env[key]
+        raise NotImplementedError("attribute of a value that is not a name")
     if isinstance(node, ast.IfExp):
         test = _expr_to_z3(node.test, env)
         if isinstance(test, bool):
@@ -619,7 +698,7 @@ class ContractVerifier:
         return_node = _inlined_return_expr(code)
         return_text = ast.unparse(return_node) if return_node is not None else None
         return_src = [return_text] if return_text else []
-        env: Dict[str, Any] = {}
+        env: Dict[str, Any] = {MODEL_ATTRIBUTES: True}
         seed_real_env(all_clauses + return_src, env, float_annotated_params(code))
         z3_builtins.seed_string_env(
             contract.preconditions + contract.postconditions + contract.invariants + return_src, env,
@@ -652,6 +731,9 @@ class ContractVerifier:
         post_fails: List[str] = []
         post_verified = 0
         post_unproven: List[str] = []
+        valueless = _valueless_bare_params(
+            code, contract.preconditions + contract.postconditions + contract.invariants
+        )
 
         # Bodies the inliner cannot express (loops, array writes) go to the
         # verification-condition model. That import is local because loop_vc
@@ -668,6 +750,13 @@ class ContractVerifier:
 
         for clause in contract.postconditions:
             references_result = _mentions_result(clause)
+            if references_result and valueless:
+                post_unproven.append(clause)
+                result["details"].append(
+                    f"  Post '{clause}' — not proven (returns {', '.join(sorted(valueless))} "
+                    "as a value, with no sign that it is a number)"
+                )
+                continue
             if references_result:
                 # Substitute the function's own return expression for ``result`` and
                 # check it like any other postcondition.
