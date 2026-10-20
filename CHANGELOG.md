@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- `simplify_function`: a translator `TypeError`, `ValueError` or `AttributeError` (e.g. a string operator) is reported as unsupported, not raised.
 - `code_orchestrator`: checkpoints did not store `code_structure` or `decomposition_plan`, so a loaded checkpoint lost both. They are stored now, with every phase field, and checkpoints written before this change still load.
 - `code_orchestrator`: `Function.callees` and `Function.callers` were never filled, and `dependency_graph` stayed empty. Coverage importance and decomposition ordering therefore ignored the call graph. They are linked now.
 - PyProver `loop_verifier`: `x / 2` was translated as Z3 integer division, which truncates, so Python's real division was not modelled. `/` is real division now. `//` and `%` follow the same rule as `simplify_function`: only a positive integer literal divisor is translated.
@@ -28,6 +29,7 @@
 
 ### Added
 
+- `simplify_function` / `verify_function_equivalence` model `list[T]` and `dict[K, V]` parameters (T, K, V in int, str, bool; K int or str), and list literals with one element sort. A container read is translated only where the solver proves it cannot fail: an index is in range, or a key is present, under the path condition. Negative indices follow Python. Conditional expressions and `and`/`or` are path-sensitive, so a guarded read is accepted and an unguarded one is rejected. Writes, aliasing, containers used as values, `in` on lists and `len()` of dicts are rejected. Tests: `src/pyprover/tests/test_containers.py`, including concrete checks of equivalence claims on empty and non-empty inputs.
 - `src/pyprover/tests/test_loop_translator.py`: real division, positive-divisor rule, and rejection of symbolic divisors in the loop translator.
 - `simplify_function` / `verify_function_equivalence` accept more of Python: annotated assignments (`x: int = e`), chained assignment (`a = b = e`), tuple unpacking with equal-length tuples (`a, b = b, a` swaps, with every right-hand side evaluated first), integer powers with a literal exponent from 0 to 16 (rewritten to products), and parameters annotated `bool` (Z3 Booleans, so `if flag:`, `not flag` and `and`/`or` translate). Float parameters stay unsupported because a real-valued equality need not hold for floats. Tests: `src/pyprover/tests/test_simplify_function.py::TestExpandedSubset`, which also renders the translated original and compares it with the source on a grid of inputs.
 - `src/code_orchestrator/tests/test_orchestrator.py`: analysis, invalid input, recommendation, coverage, reporting and checkpoint round trip. One known gap is marked `xfail(strict=True)`: checkpoints do not store `code_structure`

@@ -114,6 +114,7 @@ def _expr_to_z3_safe(node: ast.expr, env: Dict[str, Any]) -> Any:
     UnsupportedConstructError, so every caller in this file can catch one
     consistent exception type instead of two."""
     node = _PowExpander().visit(copy.deepcopy(node))
+    node = _ContainerRewriter(env).visit(node)
     for sub in ast.walk(node):
         # Z3's div/mod are Euclidean, so they differ from Python's // and %
         # whenever the divisor is negative or symbolic (Python: 7 % -2 == -1,
@@ -139,6 +140,247 @@ def _is_bool_arg(arg: ast.arg) -> bool:
 
 def _param_var(arg: ast.arg) -> Any:
     return z3.Bool(arg.arg) if _is_bool_arg(arg) else z3.Int(arg.arg)
+
+
+# ---------------------------------------------------------------------------
+# Containers: list[int] and dict[int, int] parameters, and list literals
+#
+# A list is a length (Int >= 0) and an element array (Int -> Int). A dict is
+# a presence array (Int -> Bool) and a value array (Int -> Int). Only reads
+# are modelled. Every read has an obligation that the solver must prove under
+# the current path condition, so a value is only produced for inputs where
+# Python would not raise IndexError or KeyError. A write, an alias, or a
+# container used as a value is rejected. Writes would change the caller's
+# object, and aliasing would make two names share one object, which a value
+# model cannot represent.
+# ---------------------------------------------------------------------------
+
+_PATH_KEY = "<path>"      # Z3 Bool: the condition under which the current code runs
+_COUNTER_KEY = "<counter>"  # next index for temporaries bound by _ContainerRewriter
+_TEMP_PREFIX = "__c"       # temporaries; user names may not use this prefix
+
+
+@dataclass(frozen=True)
+class _Seq:
+    length: Any  # Z3 Int
+    items: Any   # Z3 Array(Int, Int)
+
+
+@dataclass(frozen=True)
+class _Map:
+    present: Any  # Z3 Array(Int, Bool)
+    values: Any   # Z3 Array(Int, Int)
+
+
+_SORTS = {"int": z3.IntSort, "str": z3.StringSort, "bool": z3.BoolSort}
+_DEFAULTS = {"int": lambda: z3.IntVal(0), "str": lambda: z3.StringVal(""),
+             "bool": lambda: z3.BoolVal(False)}
+
+
+def _sort_name(node: ast.expr) -> Optional[str]:
+    return node.id if isinstance(node, ast.Name) and node.id in _SORTS else None
+
+
+def _param_kind(arg: ast.arg) -> Any:
+    """A hashable kind: "bool", "int", "str", ("list", elem) or ("dict", key, value)."""
+    if _is_bool_arg(arg):
+        return "bool"
+    ann = arg.annotation
+    if isinstance(ann, ast.Name) and ann.id in ("int", "str"):
+        return ann.id
+    if isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name):
+        base, sl = ann.value.id, ann.slice
+        if base in ("list", "List") and _sort_name(sl):
+            return ("list", _sort_name(sl))
+        if (base in ("dict", "Dict") and isinstance(sl, ast.Tuple) and len(sl.elts) == 2
+                and _sort_name(sl.elts[0]) in ("int", "str") and _sort_name(sl.elts[1])):
+            return ("dict", _sort_name(sl.elts[0]), _sort_name(sl.elts[1]))
+    return "int"  # unannotated parameters are Int, as before
+
+
+def _make_param(kind: Any, name: str) -> Any:
+    if kind == "bool":
+        return z3.Bool(name)
+    if kind == "str":
+        return z3.String(name)
+    if isinstance(kind, tuple) and kind[0] == "list":
+        return _Seq(z3.Int(name + "__len"),
+                    z3.Array(name + "__items", z3.IntSort(), _SORTS[kind[1]]()))
+    if isinstance(kind, tuple) and kind[0] == "dict":
+        key, val = _SORTS[kind[1]](), _SORTS[kind[2]]()
+        return _Map(z3.Array(name + "__present", key, z3.BoolSort()),
+                    z3.Array(name + "__values", key, val))
+    return z3.Int(name)
+
+
+def _input_assumptions(values: List[Any]) -> Any:
+    """Conjunction of the input facts: every container length is non-negative."""
+    facts = [v.length >= 0 for v in values if isinstance(v, _Seq)]
+    return z3.And(*facts) if facts else z3.BoolVal(True)
+
+
+def _path_of(env: Dict[str, Any]) -> Any:
+    """The path condition: every container's length is non-negative, and the
+    branch conditions taken so far all hold."""
+    return env.get(_PATH_KEY, z3.BoolVal(True))
+
+
+def _with_length_assumptions(env: Dict[str, Any]) -> None:
+    lengths = [v.length >= 0 for v in env.values() if isinstance(v, _Seq)]
+    base = env.get(_PATH_KEY, z3.BoolVal(True))
+    env[_PATH_KEY] = z3.And(base, *lengths) if lengths else base
+
+
+def _require(path: Any, cond: Any, what: str) -> None:
+    """Raise unless `cond` holds on every input that reaches this point."""
+    s = z3.Solver()
+    s.set("timeout", _Z3_TIMEOUT_MS)
+    s.add(path, z3.Not(cond))
+    if s.check() != z3.unsat:
+        raise UnsupportedConstructError(
+            f"{what} may fail on some input that reaches it (not proven in range or present)"
+        )
+
+
+def _as_key_term(e: Any, sort: Any) -> Any:
+    """An index or key as a Z3 term of `sort` (Int for lists, the key sort for dicts)."""
+    if isinstance(e, bool):
+        raise UnsupportedConstructError("container index or key has the wrong type")
+    if isinstance(e, int) and sort == z3.IntSort():
+        return z3.IntVal(e)
+    if isinstance(e, z3.ExprRef) and e.sort() == sort:
+        return e
+    raise UnsupportedConstructError("container index or key has the wrong type")
+
+
+class _ContainerRewriter(ast.NodeTransformer):
+    """Replace container reads with temporaries bound to Z3 terms, and reject
+    every other use of a container."""
+
+    def __init__(self, env: Dict[str, Any]):
+        self.env = env
+
+    def _bind(self, value: Any) -> ast.Name:
+        k = self.env.get(_COUNTER_KEY, 0)
+        self.env[_COUNTER_KEY] = k + 1
+        name = f"{_TEMP_PREFIX}{k}"
+        self.env[name] = value
+        node = ast.Name(id=name, ctx=ast.Load())
+        node.is_temp = True  # marks it as generated, so visit_Name accepts it on a second pass
+        return node
+
+    def _container(self, node: ast.expr) -> Any:
+        if isinstance(node, ast.Name) and isinstance(self.env.get(node.id), (_Seq, _Map)):
+            return self.env[node.id]
+        return None
+
+    def visit_Name(self, node: ast.Name) -> ast.expr:
+        if node.id.startswith(_TEMP_PREFIX) and not getattr(node, "is_temp", False):
+            raise UnsupportedConstructError(f"name '{node.id}' is reserved")
+        if isinstance(self.env.get(node.id), (_Seq, _Map)):
+            raise UnsupportedConstructError(
+                f"container '{node.id}' used as a value (only element reads, len() and "
+                "'in' are modelled; aliasing and mutation are not)"
+            )
+        return node
+
+    def visit_Subscript(self, node: ast.Subscript) -> ast.expr:
+        c = self._container(node.value)
+        if c is None:
+            return self.generic_visit(node)
+        index = _expr_to_z3_safe(self.visit(node.slice), self.env)
+        if isinstance(c, _Seq):
+            i = _as_key_term(index, z3.IntSort())
+            _require(_path_of(self.env), z3.And(-c.length <= i, i < c.length),
+                     f"index into '{node.value.id}'")
+            pos = z3.If(i < 0, i + c.length, i)  # Python's negative indexing
+            return self._bind(z3.Select(c.items, pos))
+        k = _as_key_term(index, c.present.domain())
+        _require(_path_of(self.env), z3.Select(c.present, k), f"key into '{node.value.id}'")
+        return self._bind(z3.Select(c.values, k))
+
+    def _under(self, cond: Any, node: ast.expr) -> Any:
+        """Translate `node` on the path where `cond` holds, then restore the path."""
+        saved = _path_of(self.env)
+        self.env[_PATH_KEY] = z3.And(saved, cond)
+        try:
+            return _expr_to_z3_safe(self.visit(node), self.env)
+        finally:
+            self.env[_PATH_KEY] = saved
+
+    def visit_IfExp(self, node: ast.IfExp) -> ast.expr:
+        cond = _expr_to_z3_safe(self.visit(node.test), self.env)
+        if not isinstance(cond, z3.BoolRef):
+            raise UnsupportedConstructError("conditional expression test must be a boolean")
+        then_term = self._under(cond, node.body)
+        else_term = self._under(z3.Not(cond), node.orelse)
+        return self._bind(z3.If(cond, then_term, else_term))
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> ast.expr:
+        # Python evaluates `and`/`or` operands left to right and stops early, so
+        # each operand is only reached on the path where the previous ones allow it.
+        saved = _path_of(self.env)
+        terms: List[Any] = []
+        reach = saved
+        try:
+            for value in node.values:
+                self.env[_PATH_KEY] = reach
+                term = _expr_to_z3_safe(self.visit(value), self.env)
+                terms.append(term)
+                reach = z3.And(reach, term) if isinstance(node.op, ast.And) else z3.And(reach, z3.Not(term))
+        finally:
+            self.env[_PATH_KEY] = saved
+        combined = z3.And(*terms) if isinstance(node.op, ast.And) else z3.Or(*terms)
+        return self._bind(combined)
+
+    def visit_Call(self, node: ast.Call) -> ast.expr:
+        if (isinstance(node.func, ast.Name) and node.func.id == "len" and len(node.args) == 1
+                and isinstance(node.args[0], ast.Name)):
+            c = self._container(node.args[0])
+            if isinstance(c, _Seq):
+                return self._bind(c.length)
+            if isinstance(c, _Map):
+                raise UnsupportedConstructError("len() of a dict is not modelled")
+        return self.generic_visit(node)
+
+    def visit_Compare(self, node: ast.Compare) -> ast.expr:
+        if (len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn))
+                and isinstance(self._container(node.comparators[0]), (_Seq, _Map))):
+            c = self._container(node.comparators[0])
+            if not isinstance(c, _Map):
+                raise UnsupportedConstructError("'in' is only modelled for dict parameters")
+            key = _as_key_term(_expr_to_z3_safe(self.visit(node.left), self.env), c.present.domain())
+            present = z3.Select(c.present, key)
+            return self._bind(present if isinstance(node.ops[0], ast.In) else z3.Not(present))
+        return self.generic_visit(node)
+
+
+def _as_z3_value(v: Any) -> Any:
+    """Python literals from the translator (int, bool) as Z3 terms."""
+    if isinstance(v, bool):
+        return z3.BoolVal(v)
+    if isinstance(v, int):
+        return z3.IntVal(v)
+    if isinstance(v, z3.ExprRef):
+        return v
+    raise UnsupportedConstructError(f"value of type {type(v).__name__} has no Z3 sort")
+
+
+def _list_literal_value(node: ast.List, env: Dict[str, Any]) -> _Seq:
+    values = [_as_z3_value(_expr_to_z3_safe(elt, env)) for elt in node.elts]
+    if not values:
+        raise UnsupportedConstructError("an empty list literal has no element sort to model")
+    sort = values[0].sort()
+    if sort not in (z3.IntSort(), z3.StringSort(), z3.BoolSort()):
+        raise UnsupportedConstructError("list literal elements must be int, str or bool")
+    default = {z3.IntSort(): z3.IntVal(0), z3.StringSort(): z3.StringVal(""),
+               z3.BoolSort(): z3.BoolVal(False)}[sort]
+    arr = z3.K(z3.IntSort(), default)
+    for j, v in enumerate(values):
+        if v.sort() != sort:
+            raise UnsupportedConstructError("list literal elements must share one sort")
+        arr = z3.Store(arr, z3.IntVal(j), v)
+    return _Seq(z3.IntVal(len(values)), arr)
 
 
 @dataclass
@@ -232,6 +474,10 @@ def _exec_stmts(
             continue
 
         if isinstance(stmt, ast.Assign):
+            if (len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
+                    and isinstance(stmt.value, ast.List)):
+                env[stmt.targets[0].id] = _list_literal_value(stmt.value, env)
+                continue
             if all(isinstance(t, ast.Name) for t in stmt.targets):
                 value = _expr_to_z3_safe(stmt.value, env)
                 for t in stmt.targets:
@@ -270,10 +516,13 @@ def _exec_stmts(
         if isinstance(stmt, ast.If):
             cond = _expr_to_z3_safe(stmt.test, env)
 
+            path = _path_of(env)
             then_env = dict(env)
+            then_env[_PATH_KEY] = z3.And(path, cond)
             then_flow = _exec_stmts(stmt.body, then_env, max_unroll)
 
             else_env = dict(env)
+            else_env[_PATH_KEY] = z3.And(path, z3.Not(cond))
             if stmt.orelse:
                 else_flow = _exec_stmts(stmt.orelse, else_env, max_unroll)
             else:
@@ -285,11 +534,25 @@ def _exec_stmts(
             if then_flow[0] == "fallthrough" and else_flow[0] == "fallthrough":
                 merged: Dict[str, Any] = {}
                 for name in set(then_env) | set(else_env):
+                    if name.startswith("<") or name.startswith(_TEMP_PREFIX):
+                        continue  # the path is restored below; temporaries are consumed
                     tv = then_env.get(name, env.get(name))
                     ev = else_env.get(name, env.get(name))
                     if tv is None or ev is None:
                         continue
-                    merged[name] = tv if (tv is ev) else z3.If(cond, tv, ev)
+                    if tv is ev:
+                        merged[name] = tv
+                    elif isinstance(tv, _Seq) and isinstance(ev, _Seq):
+                        merged[name] = _Seq(z3.If(cond, tv.length, ev.length),
+                                            z3.If(cond, tv.items, ev.items))
+                    elif isinstance(tv, _Map) and isinstance(ev, _Map):
+                        merged[name] = _Map(z3.If(cond, tv.present, ev.present),
+                                            z3.If(cond, tv.values, ev.values))
+                    elif isinstance(tv, (_Seq, _Map)) or isinstance(ev, (_Seq, _Map)):
+                        raise UnsupportedConstructError(
+                            f"container '{name}' is bound to different kinds on the two branches")
+                    else:
+                        merged[name] = z3.If(cond, tv, ev)
                 env.update(merged)
                 return _exec_stmts(list(stmts[idx + 1:]), env, max_unroll)
 
@@ -386,7 +649,8 @@ def _function_to_symbolic(
     env = dict(shared_env)
     for arg in func_node.args.args:
         if arg.arg not in env:
-            env[arg.arg] = _param_var(arg)
+            env[arg.arg] = _make_param(_param_kind(arg), arg.arg)
+    _with_length_assumptions(env)
     flow = _exec_stmts(list(func_node.body), env, max_unroll)
     if flow[0] != "return":
         raise UnsupportedConstructError(
@@ -460,18 +724,14 @@ def verify_function_equivalence(
                    f"{func_b} has {len(params_b)}",
         )
 
-    bool_a = [_is_bool_arg(a) for a in node_a.args.args]
-    bool_b = [_is_bool_arg(b) for b in node_b.args.args]
-    if bool_a != bool_b:
+    kinds_a = [_param_kind(a) for a in node_a.args.args]
+    kinds_b = [_param_kind(b) for b in node_b.args.args]
+    if kinds_a != kinds_b:
         return EquivalenceResult(
             status="unsupported",
-            reason="parameter types differ: a parameter is annotated bool in one "
-                   "function but not the other",
+            reason=f"parameter types differ: {kinds_a} versus {kinds_b}",
         )
-    shared_vars = [
-        z3.Bool(f"_arg{i}") if is_bool else z3.Int(f"_arg{i}")
-        for i, is_bool in enumerate(bool_a)
-    ]
+    shared_vars = [_make_param(kind, f"_arg{i}") for i, kind in enumerate(kinds_a)]
     env_a = {name: var for name, var in zip(params_a, shared_vars)}
     env_b = {name: var for name, var in zip(params_b, shared_vars)}
 
@@ -489,7 +749,7 @@ def verify_function_equivalence(
                    "will conflict — use an Int-typed comparison instead)",
         )
 
-    result = _prove_equal(result_a, result_b)
+    result = _prove_equal(result_a, result_b, _input_assumptions(shared_vars))
     result.proof_a = str(result_a)
     result.proof_b = str(result_b)
     return result
@@ -583,7 +843,10 @@ def simplify_function(
     except UnsupportedConstructError as e:
         return SimplificationResult(status="unsupported", reason=str(e))
 
-    env: Dict[str, Any] = {}
+    # Create the parameters here, so the input facts can be read back from them.
+    env: Dict[str, Any] = {
+        arg.arg: _make_param(_param_kind(arg), arg.arg) for arg in node.args.args
+    }
     try:
         original = _function_to_symbolic(node, env, max_unroll)
     except UnsupportedConstructError as e:
@@ -596,6 +859,13 @@ def simplify_function(
                    "parameter used as a bare boolean will conflict — use "
                    "an Int-typed comparison instead)",
         )
+    except (TypeError, ValueError, AttributeError) as e:
+        # The translator was given a construct it does not model (e.g. a string
+        # operator). That is "cannot determine", never a wrong answer.
+        return SimplificationResult(
+            status="unsupported",
+            reason=f"construct could not be translated: {type(e).__name__}: {e}",
+        )
 
     try:
         simplified = z3.simplify(original)
@@ -604,6 +874,7 @@ def simplify_function(
 
     original_str = str(original)
     simplified_str = str(simplified)
+    assumption = _input_assumptions(list(env.values()))
 
     # Z3 also reorders terms, e.g. "100 + a*50" becomes "100 + 50*a", which is
     # not a simplification. Only a result with fewer nodes is reported.
@@ -612,7 +883,7 @@ def simplify_function(
 
     # Safety net: the rewrite is only reported if the solver confirms it is
     # equal to the original for every input. Anything else is not a simplification.
-    proof = _prove_equal(original, simplified)
+    proof = _prove_equal(original, simplified, assumption)
     if proof.status != "decided" or not proof.equivalent:
         return SimplificationResult(
             status="unsupported",
@@ -671,11 +942,13 @@ def propose_redundant_branch_removal(code: str, func_name: str) -> Optional[Tupl
     return None
 
 
-def _prove_equal(a: Any, b: Any) -> EquivalenceResult:
+def _prove_equal(a: Any, b: Any, assume: Any = None) -> EquivalenceResult:
     """Shared Z3 proof step: are `a` and `b` equal for all values of their
-    free variables? (negate equality, check UNSAT)."""
+    free variables that satisfy `assume` (negate equality, check UNSAT)?"""
     s = z3.Solver()
     s.set("timeout", _Z3_TIMEOUT_MS)
+    if assume is not None:
+        s.add(assume)
     try:
         s.add(a != b)
     except z3.Z3Exception as e:
