@@ -29,6 +29,10 @@ _Z3_TIMEOUT_MS = 3000
 _RESULT_ALIASES = frozenset({"result", "return", "retval", "ret", "output"})
 # Key that marks an evaluation environment as one where object attributes are modelled.
 MODEL_ATTRIBUTES = "__model_attributes__"
+# Key that marks an evaluation environment where all(...)/any(...) over range(...) become
+# ForAll/Exists. Loop invariants need the quantified terms; clause checks handle quantified
+# clauses separately (quantifiers.py), so they leave this unset and see no change.
+MODEL_QUANTIFIERS = "__model_quantifiers__"
 
 
 class ContractInputTooLargeError(ValueError):
@@ -337,10 +341,22 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
         right = _expr_to_z3(node.right, env)
         if isinstance(node.op, ast.Div):
             # Python's / is always real division. Z3's Int / is integer division.
+            # Z3 leaves x / 0 unspecified, while Python raises, so a divisor that is not
+            # a non-zero literal is not translated: the clause is left unchecked.
+            if not (isinstance(node.right, ast.Constant) and isinstance(node.right.value, (int, float))
+                    and node.right.value != 0):
+                raise NotImplementedError("division by a value that may be zero")
             return _as_real(left) / _as_real(right)
         if isinstance(node.op, (ast.FloorDiv, ast.Mod)) and (_is_real(left) or _is_real(right)):
             # Python floor and modulo on floats are not Z3 real operations; skip the clause.
             raise NotImplementedError("floor division and modulo are not defined over reals here")
+        if isinstance(node.op, (ast.FloorDiv, ast.Mod)) and not (
+                isinstance(node.right, ast.Constant) and type(node.right.value) is int
+                and node.right.value > 0):
+            # Z3's div/mod are Euclidean and differ from Python for negative or symbolic
+            # divisors (Python 7 % -2 == -1, Z3 mod(7, -2) == 1). Only a positive literal is safe.
+            raise NotImplementedError(
+                "'//' and '%' are only supported with a positive integer literal divisor")
         op = _OP_MAP.get(type(node.op))
         if op is None:
             raise NotImplementedError(f"Unsupported BinOp: {type(node.op).__name__}")
@@ -396,11 +412,48 @@ def _expr_to_z3(node: ast.expr, env: Dict[str, Any]) -> Any:
             then_val, else_val = _as_real(then_val), _as_real(else_val)
         return z3.If(test, then_val, else_val)
     if isinstance(node, ast.Call):
+        if (env.get(MODEL_QUANTIFIERS) and isinstance(node.func, ast.Name)
+                and node.func.id in ("all", "any") and len(node.args) == 1
+                and isinstance(node.args[0], ast.GeneratorExp)):
+            return _quantifier_to_z3(node.func.id, node.args[0], env)
         result = z3_builtins.try_call_to_z3(node, env, _expr_to_z3)
         if result is not None:
             return result
         raise NotImplementedError(f"Unsupported call: {ast.dump(node.func)}")
     raise NotImplementedError(f"Unsupported AST node: {type(node).__name__}")
+
+
+def _quantifier_to_z3(kind: str, gen: ast.GeneratorExp, env: Dict[str, Any]) -> Any:
+    """Translate ``all(c for k in range(lo, hi))`` to ForAll, ``any(...)`` to Exists.
+
+    The bound variable is local to the quantifier. Bounds may use loop variables,
+    so a quantified invariant such as ``all(k < i for k in range(0, i))`` is checked
+    in INIT and PRESERVATION like any other invariant.
+    """
+    if len(gen.generators) != 1 or not isinstance(gen.generators[0].target, ast.Name):
+        raise NotImplementedError("quantifier needs exactly one loop variable")
+    comp = gen.generators[0]
+    if comp.ifs or comp.is_async:
+        raise NotImplementedError("quantifier filters are not supported")
+    rng = comp.iter
+    if not (isinstance(rng, ast.Call) and isinstance(rng.func, ast.Name) and rng.func.id == "range"):
+        raise NotImplementedError("quantifier domain must be range(...)")
+    if len(rng.args) == 1:
+        lo_node, hi_node = ast.Constant(value=0), rng.args[0]
+    elif len(rng.args) == 2:
+        lo_node, hi_node = rng.args
+    else:
+        raise NotImplementedError("range() takes one or two arguments in a quantifier")
+    lo = _expr_to_z3(lo_node, env)
+    hi = _expr_to_z3(hi_node, env)
+    var = z3.Int(comp.target.id)
+    inner = dict(env)
+    inner[comp.target.id] = var
+    body = _expr_to_z3(gen.elt, inner)
+    in_range = z3.And(lo <= var, var < hi)
+    if kind == "all":
+        return z3.ForAll([var], z3.Implies(in_range, body))
+    return z3.Exists([var], z3.And(in_range, body))
 
 
 def _is_real(e: Any) -> bool:

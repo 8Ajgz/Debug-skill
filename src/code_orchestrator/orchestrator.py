@@ -11,7 +11,7 @@ from .handoff import VerificationStateIO
 from .reporting import ReportGenerator
 from .state_machine import VerificationStateMachine
 from .tool_recommender import ToolRecommender
-from .type_stubs import (
+from .types import (
     CoverageReport,
     CodeStructure,
     DecompositionPlan,

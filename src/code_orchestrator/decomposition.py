@@ -2,7 +2,7 @@
 
 from typing import Dict, List, Set
 
-from .type_stubs import CodeStructure, DecompositionPlan, VerificationPhase
+from .types import CodeStructure, DecompositionPlan, VerificationPhase
 
 
 class DecompositionPlanner:

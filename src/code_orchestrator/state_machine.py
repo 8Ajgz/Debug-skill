@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import uuid4
 
-from .type_stubs import (
+from .types import (
     CodeStructure,
     DecompositionPlan,
     OperationError,

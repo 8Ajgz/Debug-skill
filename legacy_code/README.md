@@ -42,3 +42,17 @@ Not integrated into `src/pyprover/` this session — porting 6 languages' worth 
 3. Check `roadmap.md` §2 for the feature's full intended scope and version history (a fragment may be an intermediate patch, not the final state).
 4. Port the logic into `src/pyprover/`, converting standalone result types to `common.interop.UnifiedDebugReport`/`BugPattern` the way `pyprover_bridge.py`'s `_adapt_local_result()` already does for `ContractVerifier`.
 5. Write tests *before* declaring it done - every bug fixed in CHANGELOG 2.2.0-2.2.2 was found by actually running code against it, not by reading it. Don't repeat the mistake documented in `roadmap.md` §1 (a past audit claimed completeness it never verified).
+
+## Archived fragments (legacy_code/archive/)
+
+These four fragments cannot run, and each is superseded by live code. They were moved, not deleted, so the recovery notes stay available.
+
+| File | Why it cannot run | Live replacement |
+|---|---|---|
+| `archive/pyprover_v13_contract_simplifier.py` | The `ContractSimplifier` class has no `simplify()` method; the file is truncated | `src/pyprover/contract_simplifier.py` |
+| `archive/pyprover_v13_loop_verifier.py` | The invariant regex does not compile (`PatternError`), and `verify_loop_invariant()` body was not recovered | `src/pyprover/loop_verifier.py`, which extracts C, C++ and Java comment invariants and verifies Python loops. The fragment also claimed Go, Rust, C#, JavaScript and TypeScript support, which the live code does not have |
+| `archive/pyprover_multiline_contract_regex_fix.py` | `extract_contracts()` raises `NotImplementedError` | `ContractVerifier.parse_contract()` and the decorator parser, which accept contract strings split across lines |
+| `archive/pyprover_loop_invariant_v2_prototype.py` | The `ASTToZ3` translator it depends on was not recovered | `src/pyprover/loop_verifier.py` |
+
+Still in place, because the live code does not cover them: `pyprover_v8_2_core_with_real_template_invariants.py` (the `RECURSION` and `WHILE_LOOP` templates, which `invariant_templates.py` deliberately left out), `pyprover_js_nodejs_parser_fix.py`, and `pyprover_v11_adapters/`.
+

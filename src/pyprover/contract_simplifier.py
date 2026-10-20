@@ -29,6 +29,7 @@ clauses; ContractSimplifier then reduces them. Wire together via simplify_parsed
 """
 
 import ast
+import json
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 
@@ -39,7 +40,7 @@ except ImportError:
     Z3_AVAILABLE = False
 
 from . import z3_builtins
-from .contract_verifier import _conditional_parts, _expr_to_z3, seed_real_env
+from .contract_verifier import _conditional_parts, _expr_to_z3, _is_z3_bool, seed_real_env
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +67,7 @@ class ContractSimplificationResult:
     simplified_ensures: List[str]
     removed: List[RemovedClause] = field(default_factory=list)
     timeout_clauses: List[str] = field(default_factory=list)
+    unsupported_clauses: List[str] = field(default_factory=list)
     z3_available: bool = True
 
     @property
@@ -89,10 +91,12 @@ class ContractSimplificationResult:
     def as_decorators(self) -> str:
         """Return the simplified contract as Python decorator strings."""
         lines = []
+        # json.dumps quotes the clause as a valid Python string literal, so a
+        # clause containing double quotes (e.g. s == "a") stays parseable.
         for clause in self.simplified_requires:
-            lines.append(f'@requires("{clause}")')
+            lines.append(f"@requires({json.dumps(clause)})")
         for clause in self.simplified_ensures:
-            lines.append(f'@ensures("{clause}")')
+            lines.append(f"@ensures({json.dumps(clause)})")
         return "\n".join(lines) if lines else "# No contracts required"
 
     def summary(self) -> str:
@@ -113,6 +117,10 @@ class ContractSimplificationResult:
         if self.timeout_clauses:
             lines.append("Kept (Z3 timeout, conservative):")
             for c in self.timeout_clauses:
+                lines.append(f"  {c!r}")
+        if self.unsupported_clauses:
+            lines.append("Kept (not expressible in Z3, not checked):")
+            for c in self.unsupported_clauses:
                 lines.append(f"  {c!r}")
         return "\n".join(lines)
 
@@ -142,21 +150,6 @@ def _clause_to_z3(clause_str: str, env: Dict[str, Any]) -> Optional[Any]:
 # ---------------------------------------------------------------------------
 # Core implication check
 # ---------------------------------------------------------------------------
-
-def _is_z3_bool(expr: Any) -> bool:
-    """True if expr is a Z3 Boolean-sorted expression (safe to Solver.add()/Not()).
-
-    A bare identifier clause (e.g. an ensures-clause of just "result", no
-    comparison) parses via `_expr_to_z3`'s `ast.Name` branch to a Z3 Int,
-    not a predicate. z3.Not() and Solver.add() both raise Z3Exception on a
-    non-Bool sort, so any call site that might receive a bare-identifier
-    clause must check this first.
-    """
-    try:
-        return expr.sort_kind() == z3.Z3_BOOL_SORT
-    except Exception:
-        return False
-
 
 def _implies(antecedent_clauses: List[Any], consequent: Any, timeout_ms: int) -> str:
     """Check if ∧(antecedent_clauses) → consequent.
@@ -244,23 +237,24 @@ class ContractSimplifier:
         seed_real_env(requires + ensures, env)
         z3_builtins.seed_string_env(requires + ensures, env)
 
-        # Parse all clauses up front — unparseable ones are kept automatically
-        parsed_req = {c: _clause_to_z3(c, env) for c in requires}
-        parsed_ens = {c: _clause_to_z3(c, env) for c in ensures}
+        # Parse all clauses up front. Work on indices, not clause strings, so
+        # that duplicate clauses are separate entries and can be collapsed.
+        parsed_req = [_clause_to_z3(c, env) for c in requires]
+        parsed_ens = [_clause_to_z3(c, env) for c in ensures]
 
         # --- Simplify requires ---
-        active_req = list(requires)
-        removed_req: List[str] = []
+        active_req = list(range(len(requires)))
 
-        for clause in list(active_req):
-            z3_clause = parsed_req.get(clause)
-            if z3_clause is None:
-                continue   # keep unparseable
+        for i in list(active_req):
+            clause = requires[i]
+            z3_clause = parsed_req[i]
+            if z3_clause is None or not _is_z3_bool(z3_clause):
+                result.unsupported_clauses.append(clause)   # keep, cannot check
+                continue
 
             # Tautology check first
             if _is_tautology(z3_clause, self.timeout_ms):
-                active_req.remove(clause)
-                removed_req.append(clause)
+                active_req.remove(i)
                 result.removed.append(RemovedClause(
                     clause=clause,
                     kind="requires",
@@ -269,13 +263,12 @@ class ContractSimplifier:
                 continue
 
             # Implication check: do the remaining requires imply this clause?
-            others = [parsed_req[c] for c in active_req if c != clause and parsed_req.get(c) is not None]
+            others = [parsed_req[j] for j in active_req if j != i and parsed_req[j] is not None]
             if not others:
                 continue
             r = _implies(others, z3_clause, self.timeout_ms)
             if r == "yes":
-                active_req.remove(clause)
-                removed_req.append(clause)
+                active_req.remove(i)
                 result.removed.append(RemovedClause(
                     clause=clause,
                     kind="requires",
@@ -284,21 +277,23 @@ class ContractSimplifier:
             elif r == "unknown":
                 result.timeout_clauses.append(clause)
 
-        result.simplified_requires = active_req
+        result.simplified_requires = [requires[i] for i in active_req]
 
         # --- Simplify ensures ---
-        active_ens = list(ensures)
+        active_ens = list(range(len(ensures)))
 
         # Gather the (now-simplified) requires as antecedents for ensures checks
-        req_z3 = [parsed_req[c] for c in active_req if parsed_req.get(c) is not None]
+        req_z3 = [parsed_req[i] for i in active_req if parsed_req[i] is not None]
 
-        for clause in list(active_ens):
-            z3_clause = parsed_ens.get(clause)
-            if z3_clause is None:
+        for i in list(active_ens):
+            clause = ensures[i]
+            z3_clause = parsed_ens[i]
+            if z3_clause is None or not _is_z3_bool(z3_clause):
+                result.unsupported_clauses.append(clause)
                 continue
 
             if _is_tautology(z3_clause, self.timeout_ms):
-                active_ens.remove(clause)
+                active_ens.remove(i)
                 result.removed.append(RemovedClause(
                     clause=clause,
                     kind="ensures",
@@ -307,13 +302,13 @@ class ContractSimplifier:
                 continue
 
             # Antecedents: all requires + other ensures
-            other_ens = [parsed_ens[c] for c in active_ens if c != clause and parsed_ens.get(c) is not None]
+            other_ens = [parsed_ens[j] for j in active_ens if j != i and parsed_ens[j] is not None]
             antecedents = req_z3 + other_ens
             if not antecedents:
                 continue
             r = _implies(antecedents, z3_clause, self.timeout_ms)
             if r == "yes":
-                active_ens.remove(clause)
+                active_ens.remove(i)
                 result.removed.append(RemovedClause(
                     clause=clause,
                     kind="ensures",
@@ -322,7 +317,7 @@ class ContractSimplifier:
             elif r == "unknown":
                 result.timeout_clauses.append(clause)
 
-        result.simplified_ensures = active_ens
+        result.simplified_ensures = [ensures[i] for i in active_ens]
         return result
 
 

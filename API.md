@@ -1,6 +1,6 @@
 # Verification-Debugging-Suite API Reference
 
-**Auto-generated from source code. For usage examples, see SKILL.md.**
+**Hand-maintained; not generated from source. Keep in sync with openapi.yaml and INTEROP.yaml. For usage examples, see SKILL.md.**
 
 ---
 

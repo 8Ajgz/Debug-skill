@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """End-to-end examples: execute_with_debug + BugPatternDetector."""
 
+import os
+import sys
+
+# Run as a script from any directory: the sibling modules live next to this file.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from debug_report import execute_with_debug
 from bug_patterns import BugPatternDetector
 

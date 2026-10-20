@@ -1,6 +1,6 @@
 """Report generation for coverage and verification progress."""
 
-from .type_stubs import CoverageReport, VerificationState
+from .types import CoverageReport, VerificationState
 
 
 class ReportGenerator:
