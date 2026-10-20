@@ -369,3 +369,74 @@ def f(x):
     result = _verify(code)
     assert result["verified"] is False
     assert result.get("inconclusive") is True
+
+
+def test_two_arrays_with_disjoint_writes_verify_in_every_grouping():
+    # Writing index 0 of a and index 1 of b leaves a[0] alone, even when a is b.
+    code = """
+def f(a, b):
+    # Pre: len(a) > 1 and len(b) > 1
+    # Post: result == 5
+    a[0] = 5
+    b[1] = 6
+    return a[0]
+"""
+    assert _verify(code)["verified"] is True
+
+
+def test_aliased_writes_to_the_same_index_are_caught():
+    # If a is b, the second write overwrites the first, so the result is 6.
+    code = """
+def f(a, b):
+    # Pre: len(a) > 0 and len(b) > 0
+    # Post: result == 5
+    a[0] = 5
+    b[0] = 6
+    return a[0]
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result.get("inconclusive") is True
+
+
+def test_lengths_that_exclude_aliasing_let_the_proof_go_through():
+    # With len(a) == 2 and len(b) == 3, a and b cannot be the same list.
+    code = """
+def f(a, b):
+    # Pre: len(a) == 2 and len(b) == 3
+    # Post: result == 5
+    a[0] = 5
+    b[0] = 6
+    return a[0]
+"""
+    assert _verify(code)["verified"] is True
+
+
+def test_two_objects_written_through_different_names_are_grouped():
+    code = """
+def f(p, q):
+    # Pre: p.n >= 0 and q.n >= 0
+    # Post: result >= 0
+    p.n = 1
+    q.n = 2
+    return p.n
+"""
+    # If p is q, p.n is 2 here, which still satisfies the post, so this verifies.
+    assert _verify(code)["verified"] is True
+
+
+def test_five_arrays_with_writes_are_too_many_to_check():
+    code = """
+def f(a, b, c, d, e):
+    # Pre: len(a) > 0
+    # Post: result >= 0
+    a[0] = 1
+    b[0] = 1
+    c[0] = 1
+    d[0] = 1
+    e[0] = 1
+    return 0
+"""
+    result = _verify(code)
+    assert result["verified"] is False
+    assert result.get("inconclusive") is True

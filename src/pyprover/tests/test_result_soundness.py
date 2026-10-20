@@ -256,13 +256,14 @@ def f(arr):
     assert _verify(code)["verified"] is True
 
 
-def test_array_write_with_second_array_is_inconclusive():
+def test_array_write_read_through_second_array_is_inconclusive():
+    # If a and b are the same list, b[0] is 5. If they are different, b[0] is unknown.
     code = """
 def f(a, b):
-    # Pre: len(a) > 0
-    # Post: result == 0
+    # Pre: len(a) > 0 and len(b) > 0
+    # Post: result == 5
     a[0] = 5
-    return b[0] - b[0]
+    return b[0]
 """
     result = _verify(code)
     assert result["verified"] is False

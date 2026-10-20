@@ -32,6 +32,7 @@ this model is never reported as a failure, because havoc and index bounds can
 produce states that no real run reaches.
 """
 import ast
+import copy
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -61,6 +62,7 @@ class _Context:
     # (guard, value or None for a fall-through, extra premises)
     sinks: List[Tuple[Any, Any, List[Any]]] = field(default_factory=list)
     loop_assumptions: List[Any] = field(default_factory=list)
+    mapping: Dict[str, str] = field(default_factory=dict)
     fresh: int = 0
 
     @property
@@ -93,6 +95,20 @@ def check_result_clauses(
         return None
 
 
+# Aliasing: two parameters can be the same object at the call site. A write through
+# one then changes what the other reads. The model therefore checks every grouping of
+# the accessed parameters into objects, and a result holds only if it holds for all.
+_MAX_ALIAS_PARAMS = 4   # Bell(4) = 15 groupings
+
+
+@dataclass(frozen=True)
+class _Access:
+    containers: frozenset
+    objects: frozenset
+    fields: frozenset
+    writes: bool
+
+
 def _check(code, clauses, pre_clauses, float_params):
     tree = ast.parse(code)
     funcs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
@@ -104,35 +120,86 @@ def _check(code, clauses, pre_clauses, float_params):
         raise _Unmodelled("unsupported parameter kinds")
     params = [a.arg for a in args.args]
 
-    containers, objects, field_keys = _find_accessed(func, params)
-    assigned = _assigned_names(func.body)
-    called = {n.func.id for n in ast.walk(func) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-    loaded = {n.id for n in ast.walk(func) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
-    global_names = loaded - set(params) - assigned - called
+    access = _find_accessed(func, params, strict=True)
+    accessed = sorted(access.containers | access.objects)
+    mutating = access.writes or _has_impure_call(func.body)
+    if mutating and len(accessed) > _MAX_ALIAS_PARAMS:
+        raise _Unmodelled(f"more than {_MAX_ALIAS_PARAMS} arrays or objects to check for aliasing")
+    groupings = list(_groupings(accessed)) if mutating else [[[name] for name in accessed]]
+
+    per_grouping = []
+    for blocks in groupings:
+        mapping = {member: block[0] for block in blocks for member in block}
+        per_grouping.append(
+            _check_grouping(code, func, params, mapping, clauses, pre_clauses, float_params)
+        )
+    return {
+        clause: _combine([verdicts[index] for verdicts in per_grouping])
+        for index, clause in enumerate(clauses)
+    }
+
+
+def _combine(verdicts):
+    """A clause holds only if it holds under every aliasing grouping."""
+    for verdict, detail in verdicts:
+        if verdict == "no":
+            return ("no", detail)
+    if all(verdict == "yes" for verdict, _ in verdicts):
+        return ("yes", None)
+    for verdict, detail in verdicts:
+        if verdict != "yes":
+            return ("unknown", detail)
+    return ("unknown", None)
+
+
+def _groupings(items):
+    """Every way to split ``items`` into groups, each group being one object."""
+    if not items:
+        yield []
+        return
+    first, rest = items[0], items[1:]
+    for grouping in _groupings(rest):
+        yield [[first]] + grouping
+        for index in range(len(grouping)):
+            yield grouping[:index] + [[first] + grouping[index]] + grouping[index + 1:]
+
+
+def _check_grouping(code, func, params, mapping, clauses, pre_clauses, float_params):
+    """Run the model with each name in ``mapping`` replaced by its group's representative."""
+    body_func = _rename_names(func, mapping) if mapping else func
+    new_params = list(dict.fromkeys(mapping.get(p, p) for p in params))
+    pre = [_rename_text(text, mapping) for text in pre_clauses]
+    renamed_clauses = [_rename_text(clause, mapping) for clause in clauses]
+
+    access = _find_accessed(body_func, new_params, strict=False)
+    assigned = _assigned_names(body_func.body)
+    called = {n.func.id for n in ast.walk(body_func) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    loaded = {n.id for n in ast.walk(body_func) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
     ctx = _Context(
         lines=code.splitlines(),
-        containers=containers,
-        objects=objects,
-        field_keys=field_keys,
-        global_names=global_names,
+        containers=set(access.containers),
+        objects=set(access.objects),
+        field_keys=set(access.fields),
+        global_names=loaded - set(new_params) - assigned - called,
+        mapping=mapping,
     )
 
     env: Dict[str, Any] = {cv.MODEL_ATTRIBUTES: True}
-    for p in params:
-        if p in containers:
+    for p in new_params:
+        if p in ctx.containers:
             env[p] = z3.Array(p, z3.IntSort(), z3.IntSort())
         elif p in float_params:
             env[p] = z3.Real(p)
-        elif p not in objects:
+        elif p not in ctx.objects:
             env[p] = z3.Int(p)
-    for c in containers:
+    for c in ctx.containers:
         ctx.premises.append(cv._length_const(c, env) >= 0)
-    for text in pre_clauses:
+    for text in pre:
         part = cv._clause_to_z3(text, dict(env))
         if part is not None and cv._is_z3_bool(part):
             ctx.premises.append(part)
 
-    st, live = _exec(func.body, dict(env), z3.BoolVal(True), ctx)
+    st, live = _exec(body_func.body, dict(env), z3.BoolVal(True), ctx)
     if not z3.is_false(z3.simplify(live)):
         ctx.sinks.append((live, None, []))
 
@@ -145,8 +212,27 @@ def _check(code, clauses, pre_clauses, float_params):
     ]
     if failed:
         note = "loop invariant not established: " + "; ".join(failed)
-        return {clause: ("unknown", note) for clause in clauses}
-    return {clause: _judge(clause, env, ctx) for clause in clauses}
+        return [("unknown", note) for _ in clauses]
+    return [_judge(clause, env, ctx) for clause in renamed_clauses]
+
+
+def _rename_names(func: ast.AST, mapping: Dict[str, str]) -> ast.AST:
+    class _Rename(ast.NodeTransformer):
+        def visit_Name(self, node: ast.Name) -> ast.AST:
+            return ast.copy_location(ast.Name(id=mapping.get(node.id, node.id), ctx=node.ctx), node)
+
+    return ast.fix_missing_locations(_Rename().visit(copy.deepcopy(func)))
+
+
+def _rename_text(text: str, mapping: Dict[str, str]) -> str:
+    if not mapping:
+        return text
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError:
+        raise _Unmodelled(f"clause cannot be renamed for aliasing: {text}")
+    tree = _rename_names(tree, mapping)
+    return ast.unparse(tree.body)
 
 
 def _judge(clause, env, ctx):
@@ -179,7 +265,13 @@ def _judge(clause, env, ctx):
 # Accessed names: which parameters are arrays or objects, and how they are used
 # ---------------------------------------------------------------------------
 
-def _find_accessed(func: ast.AST, params: List[str]) -> Tuple[Set[str], Set[str], Set[str]]:
+def _find_accessed(func: ast.AST, params: List[str], strict: bool) -> _Access:
+    """Which parameters are arrays or objects, and whether anything is written.
+
+    ``strict`` is set for the original function, where one name used both as an
+    array and as an object is rejected. Renamed bodies may merge names that alias,
+    so there the check is skipped.
+    """
     nodes = list(ast.walk(func))
     parents: Dict[ast.AST, ast.AST] = {}
     for node in nodes:
@@ -206,19 +298,16 @@ def _find_accessed(func: ast.AST, params: List[str]) -> Tuple[Set[str], Set[str]
     accessed = containers | objects
     if not accessed <= set(params):
         raise _Unmodelled("subscript, iteration or attribute on a name that is not a parameter")
-    if containers & objects:
+    if strict and containers & objects:
         raise _Unmodelled("a name is used both as an array and as an object")
-    if writes and len(accessed) > 1:
-        # Two names can refer to the same object, so a write through one may change
-        # what the other reads. Without alias analysis that is not modelled.
-        raise _Unmodelled("write while another array or object is accessed (possible aliasing)")
 
     for node in nodes:
-        if not isinstance(node, ast.Name):
+        if not isinstance(node, ast.Name) or node.id not in accessed:
             continue
         parent = parents.get(node)
+        allowed = False
         if node.id in containers:
-            allowed = (
+            allowed = allowed or (
                 (isinstance(parent, ast.Subscript) and parent.value is node)
                 or (isinstance(parent, ast.For) and parent.iter is node)
                 or (
@@ -229,13 +318,11 @@ def _find_accessed(func: ast.AST, params: List[str]) -> Tuple[Set[str], Set[str]
                     and parent.args[0] is node
                 )
             )
-        elif node.id in objects:
-            allowed = isinstance(parent, ast.Attribute) and parent.value is node
-        else:
-            continue
+        if node.id in objects:
+            allowed = allowed or (isinstance(parent, ast.Attribute) and parent.value is node)
         if not allowed:
             raise _Unmodelled(f"bare use of '{node.id}' as a value")
-    return containers, objects, field_keys
+    return _Access(frozenset(containers), frozenset(objects), frozenset(field_keys), writes)
 
 
 # ---------------------------------------------------------------------------
@@ -508,15 +595,17 @@ def _loop_invariants(stmt: ast.stmt, ctx: _Context) -> List[str]:
     """Invariants from ``# Invariant:`` comments directly above the loop, in order."""
     explicit = getattr(stmt, "_pyprover_invariants", None)
     if explicit is not None:
-        return list(explicit)
-    found = []
-    row = stmt.lineno - 2
-    while row >= 0 and ctx.lines[row].lstrip().startswith("#"):
-        match = _INVARIANT_RE.match(ctx.lines[row])
-        if match:
-            found.append(match.group(1))
-        row -= 1
-    return list(reversed(found))
+        found = list(explicit)
+    else:
+        found = []
+        row = stmt.lineno - 2
+        while row >= 0 and ctx.lines[row].lstrip().startswith("#"):
+            match = _INVARIANT_RE.match(ctx.lines[row])
+            if match:
+                found.append(match.group(1))
+            row -= 1
+        found.reverse()
+    return [_rename_text(text, ctx.mapping) for text in found]
 
 
 def _assigned_names(stmts: List[ast.stmt]) -> Set[str]:
