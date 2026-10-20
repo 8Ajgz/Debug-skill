@@ -45,10 +45,23 @@ SUPPORTED SUBSET (straight-line + branching, no loops in the general path):
     for C/C++: sound *up to the unroll bound*, not a proof for all N unless
     N is fixed and within the bound.
 
-NOT SUPPORTED, HONESTLY, NOT SILENTLY: function calls other than the
-built-in operators above, list/dict/string operations, recursion, unbounded
-or nested loops, mutation of aliased objects, generators, exceptions as
-control flow, multiple return values, float parameters (Python floats round,
+CLASS AND CALL MODELS: a parameter or a field annotated with a class the
+analysed file can reach (the same file, or one it imports from this repository,
+see project_index.py) is read as an object. Its scalar and container fields are
+symbols, and it is read-only: a method that writes a field is not inlined. An
+Enum subclass with distinct literal members is a finite value, compared by
+identity with its members. A call to a function or method is inlined by
+symbolically executing its body with the arguments bound, if the body is pure
+(no field writes), not recursive, undecorated, and returns on every path.
+Properties are calls with no arguments. A method or field that a subclass may
+override is not read, because the subclass's version could run instead. Subclasses
+are found by base-class name: in the repository with a ProjectScope, and in the
+analysed code alone without one (the domain records that assumption).
+
+NOT SUPPORTED, HONESTLY, NOT SILENTLY: calls that write fields, calls to
+built-in methods (list.append, str.join), constructors, keyword arguments,
+recursion, unbounded or nested loops, mutation of aliased objects, generators,
+exceptions as control flow, multiple return values, float parameters (Python floats round,
 so an equality proven over the reals need not hold for floats), and a bare
 boolean used with and/or/not when its parameter is not annotated `bool`. The
 reused `_expr_to_z3` seeds an unannotated name as a Z3 `Int`, so `not flag`
@@ -73,10 +86,12 @@ except ImportError:
     Z3_AVAILABLE = False
 
 from .contract_verifier import _expr_to_z3, _OP_MAP, _as_real
+from .project_index import base_name as _name_of, subclass_members as _subclass_members
 
 _Z3_TIMEOUT_MS = 5000
 DEFAULT_MAX_UNROLL = 64
 MAX_POW_EXPONENT = 16
+MAX_CALL_DEPTH = 8  # calls nested inside calls, each inlined into its caller
 
 
 class UnsupportedConstructError(ValueError):
@@ -114,7 +129,7 @@ def _expr_to_z3_safe(node: ast.expr, env: Dict[str, Any]) -> Any:
     UnsupportedConstructError, so every caller in this file can catch one
     consistent exception type instead of two."""
     node = _PowExpander().visit(copy.deepcopy(node))
-    node = _SelfRewriter(env).visit(node)
+    node = _FieldRewriter(env).visit(node)
     node = _ContainerRewriter(env).visit(node)
     for sub in ast.walk(node):
         # Z3's div/mod are Euclidean, so they differ from Python's // and %
@@ -169,10 +184,16 @@ _EXITS_KEY = "<exits>"      # list of (path, field state) recorded at each retur
 _WRITES_NOTE = "only the returned value is simplified; field writes are not part of the result"
 _RAISE_NOTE = "inputs that reach a raise statement are excluded"
 _RANGE_NOTE = "loops over range(n) are exact for n at most the unroll bound"
+_ENUM_NOTE = "an enum value is shown as the index of its member"
+_CLOSED_NOTE = ("a class's methods and fields are taken to be its own, since no subclass is in the "
+                "analysed code; pass a ProjectScope to check the repository")
 
 
 _EXPRESSION_KEY = "<expression>"  # set for standalone expressions, whose free names are variables
 _MODELLED_BUILTINS = frozenset({"abs", "min", "max", "len", "isinstance", "range"})
+_SCOPE_KEY = "<scope>"            # the scope that resolves the class and function names the code uses
+_CALL_STACK_KEY = "<calls>"       # names of the functions being inlined, outermost first
+_MAX_UNROLL_KEY = "<max_unroll>"  # the loop bound, which an inlined call uses too
 
 
 class _Opaque:
@@ -208,6 +229,97 @@ class _Map:
     values: Any   # Z3 Array(Int, Int)
 
 
+@dataclass(frozen=True)
+class _Enum:
+    """A value of a plain Enum class, as an index into its members. The index is in
+    [0, number of members), a domain fact recorded wherever the value is created."""
+    classdef: ast.ClassDef
+    term: Any  # Z3 Int, or the index of a member
+
+
+@dataclass
+class _Record:
+    """A dataclass instance built by a constructor call, as the value of each declared field.
+
+    A dataclass compares by its fields, so two records are equal exactly when every field
+    is equal (see _same_result). A record is immutable here: it is returned, bound to a
+    name, and read field by field, but no statement writes to it."""
+    classdef: ast.ClassDef
+    fields: Dict[str, Any]
+
+    def __str__(self) -> str:
+        return f"{self.classdef.name}({', '.join(f'{k}={v}' for k, v in self.fields.items())})"
+
+
+class _LocalScope:
+    """The classes and functions defined at the top level of the analysed file only.
+    A name the file imports is not resolved, so anything that names it is not modelled."""
+
+    def __init__(self, code: str):
+        tree = ast.parse(code)
+        self._classes = {n.name: n for n in tree.body if isinstance(n, ast.ClassDef)}
+        self._functions = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        self._all_classes = [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]
+
+    def class_def(self, name: str) -> Optional[ast.ClassDef]:
+        return self._classes.get(name)
+
+    def function_def(self, name: str) -> Optional[ast.FunctionDef]:
+        return self._functions.get(name)
+
+    def subclass_members(self, classdef: ast.ClassDef) -> set:
+        """Names that subclasses in the analysed code define. Subclasses elsewhere are not seen."""
+        return _subclass_members(self._all_classes, classdef.name)
+
+
+def _base_name(node: ast.expr) -> Optional[str]:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _enum_members(classdef: ast.ClassDef) -> Optional[Dict[str, int]]:
+    """Member name -> index, for a plain Enum subclass whose members are distinct int or
+    str literals. None for anything else: an Enum whose values could alias, a bool or
+    other literal value, or a member computed by a call (such as auto())."""
+    if len(classdef.bases) != 1 or _base_name(classdef.bases[0]) != "Enum":
+        return None
+    members: Dict[str, int] = {}
+    values: List[str] = []
+    for stmt in classdef.body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            continue  # docstring
+        if isinstance(stmt, ast.FunctionDef):
+            continue  # a method is not a member; calling one on a member is not modelled
+        if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and not stmt.targets[0].id.startswith("_")
+                and isinstance(stmt.value, ast.Constant)
+                and type(stmt.value.value) in (int, str)):
+            members[stmt.targets[0].id] = len(members)
+            values.append(repr(stmt.value.value))
+            continue
+        return None
+    if not members or len(set(values)) != len(values):
+        return None
+    return members
+
+
+def _annotation_class(annotation: ast.expr, scope: Any) -> Optional[ast.ClassDef]:
+    """The class an annotation names in the scope, or None. A string annotation is read
+    as the name it spells."""
+    if scope is None:
+        return None
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            annotation = ast.parse(annotation.value, mode="eval").body
+        except SyntaxError:
+            return None
+    return scope.class_def(annotation.id) if isinstance(annotation, ast.Name) else None
+
+
 _SORTS = {"int": z3.IntSort, "str": z3.StringSort, "bool": z3.BoolSort, "float": z3.RealSort}
 _DEFAULTS = {"int": lambda: z3.IntVal(0), "str": lambda: z3.StringVal(""), "float": lambda: z3.RealVal(0),
              "bool": lambda: z3.BoolVal(False)}
@@ -217,10 +329,13 @@ def _sort_name(node: ast.expr) -> Optional[str]:
     return node.id if isinstance(node, ast.Name) and node.id in _SORTS else None
 
 
-def _param_kind(arg: ast.arg, body: Optional[List[ast.stmt]] = None) -> Any:
+def _param_kind(arg: ast.arg, body: Optional[List[ast.stmt]] = None, scope: Any = None) -> Any:
     """A hashable kind: "bool", "int", "float", "str", ("list", elem),
-    ("dict", key, value) or ("opt", base). An unannotated parameter is an int.
+    ("dict", key, value), ("opt", base), ("enum", classdef) or ("obj", classdef).
+    An unannotated parameter is an int.
 
+    A class named by the annotation, in `scope`, is ("enum", classdef) for a plain
+    Enum and ("obj", classdef) for any other class (see the class models above).
     Any other annotation is not modelled. If the function body never reads the
     parameter, its type cannot change the result, so it is kind "unused". If the
     body does read it, the annotation is rejected rather than read as an int."""
@@ -248,6 +363,9 @@ def _param_kind(arg: ast.arg, body: Optional[List[ast.stmt]] = None) -> Any:
         base_sides = [x for x in sides if _sort_name(x)]
         if len(none_sides) == 1 and len(base_sides) == 1:
             return ("opt", _sort_name(base_sides[0]))
+    named = _annotation_class(ann, scope)
+    if named is not None:
+        return ("enum", named) if _enum_members(named) is not None else ("obj", named)
     if body is not None and not _reads_name(body, arg.arg):
         return "unused"
     raise UnsupportedConstructError(
@@ -278,7 +396,19 @@ def _reads_name(body: List[ast.stmt], name: str) -> bool:
                for n in ast.walk(ast.Module(body=list(body), type_ignores=[])))
 
 
-def _make_param(kind: Any, name: str) -> Any:
+def _make_param(kind: Any, name: str, facts: Optional[List[Any]] = None, scope: Any = None) -> Any:
+    """The symbolic value of a parameter of this kind. An enum or an object needs
+    `facts` (its domain is recorded there) and, for an object, the `scope` its class
+    is read in."""
+    if isinstance(kind, tuple) and kind[0] in ("enum", "obj") and facts is None:
+        raise UnsupportedConstructError("internal: a class-typed value needs a facts list")
+    if isinstance(kind, tuple) and kind[0] == "enum":
+        count = len(_enum_members(kind[1]) or {})
+        facts.append(z3.And(z3.Int(name) >= 0, z3.Int(name) < count))
+        facts.append(_ENUM_NOTE)
+        return _Enum(kind[1], z3.Int(name))
+    if isinstance(kind, tuple) and kind[0] == "obj":
+        return _class_object(kind[1], f"{name}.", scope, facts)
     if kind == "unused":
         return z3.Int(name)  # never read, so its value does not matter
     if kind == "bool":
@@ -342,6 +472,10 @@ def _merge_envs(cond: Any, then_env: Dict[str, Any], else_env: Dict[str, Any],
             merged[name] = _Seq(z3.If(cond, tv.length, ev.length), z3.If(cond, tv.items, ev.items))
         elif isinstance(tv, _Map) and isinstance(ev, _Map):
             merged[name] = _Map(z3.If(cond, tv.present, ev.present), z3.If(cond, tv.values, ev.values))
+        elif isinstance(tv, _Enum) and isinstance(ev, _Enum) and tv.classdef is ev.classdef:
+            merged[name] = _Enum(tv.classdef, z3.If(cond, tv.term, ev.term))
+        elif isinstance(tv, _Record) and isinstance(ev, _Record) and tv.classdef is ev.classdef:
+            merged[name] = _select(cond, tv, ev)
         elif isinstance(tv, (_Seq, _Map)) or isinstance(ev, (_Seq, _Map)):
             raise UnsupportedConstructError(
                 f"container '{name}' is bound to different kinds on the two branches")
@@ -462,36 +596,76 @@ def _unroll_container_loop(stmt: ast.For, env: Dict[str, Any], max_unroll: int) 
     return current
 
 
-class _SelfRef:
-    """The `self` of a method. Its fields are symbols fixed for the whole call.
+class _ObjRef:
+    """An object whose fields are read through names `<prefix><attr>` in the environment.
 
-    The method is analysed without any writes to self and without calls to user
-    code (both are rejected elsewhere), so no statement can change a field between
-    two reads. `cache` is shared between the two sides of an equivalence check, so
-    both sides see the same field values.
+    The `self` of a method (prefix "self__") and a parameter annotated with a class
+    (prefix "<param>.") are both read this way. Each field is a symbol fixed for the
+    whole call. A method's self may be written, but only where `is_self` is set, and
+    a call that writes fields is not inlined. A parameter object is never written,
+    so no statement can change a field between two reads.
+
+    `cache` is shared between the two sides of an equivalence check, so both sides
+    see the same field values. `methods` and `properties` are the names the class
+    defines once; a name defined twice (a property with a setter, say) is left out,
+    so calling it is not modelled.
     """
 
-    def __init__(self, fields: Dict[str, Any], cache: Dict[str, Any], facts: List[Any]):
+    def __init__(self, fields: Dict[str, Any], cache: Dict[str, Any], facts: List[Any],
+                 prefix: str = "self__", classdef: Optional[ast.ClassDef] = None,
+                 scope: Any = None, is_self: Optional[bool] = None):
         self.fields = fields
         self.cache = cache
         self.facts = facts
+        self.prefix = prefix
+        self.classdef = classdef
+        self.scope = scope
+        self.is_self = prefix == "self__" if is_self is None else is_self
+        self.label = "self" if self.is_self else prefix.rstrip(".")
+        # A subclass may override these names, so reading one here could run its code instead.
+        self.overridable: set = set()
+        if classdef is not None and scope is not None:
+            self.overridable = scope.subclass_members(classdef)
+            if isinstance(scope, _LocalScope):
+                facts.append(_CLOSED_NOTE)
+        defs = [f for f in (classdef.body if classdef is not None else [])
+                if isinstance(f, ast.FunctionDef)]
+        counts = {f.name: 0 for f in defs}
+        for f in defs:
+            counts[f.name] += 1
+        once = [f for f in defs if counts[f.name] == 1]
+        self.methods: Dict[str, ast.FunctionDef] = {f.name: f for f in once}
+        self.properties = {f.name for f in once if any(
+            isinstance(d, ast.Name) and d.id == "property" for d in f.decorator_list)}
 
     def kind(self, attr: str) -> Any:
         kind = self.fields.get(attr)
         if kind is None:
-            raise UnsupportedConstructError(f"field 'self.{attr}' has no modelled type")
+            raise UnsupportedConstructError(f"field '{self.label}.{attr}' has no modelled type")
         if isinstance(kind, str) and kind.startswith("!"):
             raise UnsupportedConstructError(kind[1:])
+        if isinstance(kind, tuple) and kind[0] == "obj":
+            raise UnsupportedConstructError(
+                f"field '{self.label}.{attr}' holds an object, and nested objects are not modelled")
         return kind
 
     def value(self, attr: str) -> Any:
         kind = self.kind(attr)
         if attr not in self.cache:
-            term = _make_param(kind, f"self__{attr}")
+            term = _make_param(kind, f"{self.prefix}{attr}", self.facts, self.scope)
             self.cache[attr] = term
             if isinstance(term, _Seq):
                 self.facts.append(term.length >= 0)
         return self.cache[attr]
+
+
+# A name for the object of a method, kept so that code and tests written for self still read the same.
+_SelfRef = _ObjRef
+
+
+def _class_object(classdef: ast.ClassDef, prefix: str, scope: Any, facts: List[Any]) -> _ObjRef:
+    """A read-only object of a project class, whose field symbols start with `prefix`."""
+    return _ObjRef(_class_fields(classdef, scope), {}, facts, prefix=prefix, classdef=classdef, scope=scope)
 
 
 _SCALAR_FIELD_KINDS = ("int", "bool", "str", "float")
@@ -501,10 +675,15 @@ def _self_name_of(func_node: ast.FunctionDef) -> Optional[str]:
     return func_node.args.args[0].arg if func_node.args.args else None
 
 
+def _attributes_on(body: List[ast.stmt], name: str) -> set:
+    """Every attribute the body reads or writes through the name `name`."""
+    return {n.attr for n in ast.walk(ast.Module(body=list(body), type_ignores=[]))
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == name}
+
+
 def _self_attributes(func_node: ast.FunctionDef, self_name: str) -> set:
     """Every field the body reads or writes through `self`."""
-    return {n.attr for n in ast.walk(ast.Module(body=list(func_node.body), type_ignores=[]))
-            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == self_name}
+    return _attributes_on(func_node.body, self_name)
 
 
 def _writes_fields(func_node: ast.FunctionDef, self_name: str) -> bool:
@@ -513,8 +692,8 @@ def _writes_fields(func_node: ast.FunctionDef, self_name: str) -> bool:
                for n in ast.walk(ast.Module(body=list(func_node.body), type_ignores=[])))
 
 
-def _self_ref_in(env: Dict[str, Any]) -> Optional["_SelfRef"]:
-    return next((v for v in env.values() if isinstance(v, _SelfRef)), None)
+def _self_ref_in(env: Dict[str, Any]) -> Optional["_ObjRef"]:
+    return next((v for v in env.values() if isinstance(v, _ObjRef) and v.is_self), None)
 
 
 def _final_field(exits: List[Any], attr: str, initial: Any) -> Any:
@@ -530,10 +709,10 @@ def _final_field(exits: List[Any], attr: str, initial: Any) -> Any:
     return result
 
 
-def _annotation_kind(annotation: ast.expr) -> Any:
+def _annotation_kind(annotation: ast.expr, scope: Any = None) -> Any:
     """The kind of a field from its annotation, or the reason it is not modelled."""
     try:
-        return _param_kind(ast.arg(arg="_", annotation=annotation), body=None)
+        return _param_kind(ast.arg(arg="_", annotation=annotation), body=None, scope=scope)
     except UnsupportedConstructError:
         return f"!field annotation not modelled: {ast.unparse(annotation)}"
 
@@ -552,12 +731,12 @@ def _literal_kind(value: ast.expr) -> Any:
     return "!a field assigned a list literal needs an annotation"
 
 
-def _class_fields(classdef: ast.ClassDef) -> Dict[str, Any]:
+def _class_fields(classdef: ast.ClassDef, scope: Any = None) -> Dict[str, Any]:
     """The kind of each instance field, from annotations and assignments in any method.
 
     A field is typed by an annotation, or else by the literals assigned to it. A field
     assigned something of unknown type, assigned two kinds, or named like a method is
-    marked unsupported.
+    marked unsupported. Annotations that name a class are read in `scope`.
     """
     kinds: Dict[str, Any] = {}
     annotated: set = set()
@@ -576,7 +755,7 @@ def _class_fields(classdef: ast.ClassDef) -> Dict[str, Any]:
     methods = {f.name for f in classdef.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
     for stmt in classdef.body:
         if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-            note(stmt.target.id, _annotation_kind(stmt.annotation), True)
+            note(stmt.target.id, _annotation_kind(stmt.annotation, scope), True)
         elif (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
               and isinstance(stmt.targets[0], ast.Name)):
             k = _literal_kind(stmt.value)
@@ -590,7 +769,7 @@ def _class_fields(classdef: ast.ClassDef) -> Dict[str, Any]:
             for a in stmt.args.args:
                 if a.annotation is not None:
                     try:
-                        param_kinds[a.arg] = _param_kind(a, body=None)
+                        param_kinds[a.arg] = _param_kind(a, body=None, scope=scope)
                     except UnsupportedConstructError:
                         pass
             for n in ast.walk(stmt):
@@ -603,7 +782,7 @@ def _class_fields(classdef: ast.ClassDef) -> Dict[str, Any]:
                         and target.value.id == "self"):
                     continue
                 if annotation is not None:
-                    note(target.attr, _annotation_kind(annotation), True)
+                    note(target.attr, _annotation_kind(annotation, scope), True)
                 else:
                     k = _literal_kind(value)
                     if k is None and isinstance(value, ast.Name) and value.id in param_kinds:
@@ -632,25 +811,64 @@ def _method_owner(code: str, func_name: str, lineno: int) -> Optional[ast.ClassD
     return None
 
 
-class _SelfRewriter(ast.NodeTransformer):
-    """self.field reads become names bound to the field's symbol. Any other use of
-    self is rejected: it could hand the object to code this model cannot see."""
+class _FieldRewriter(ast.NodeTransformer):
+    """Field reads of an object become names bound to the field's symbol. A call of one
+    of its methods is left for the call model, and a property read is left for it too.
+    Any other use of the object is rejected: it could hand the object to code this
+    model cannot see."""
 
     def __init__(self, env: Dict[str, Any]):
         self.env = env
 
+    def _object(self, node: ast.expr) -> Optional[_ObjRef]:
+        if isinstance(node, ast.Name) and isinstance(self.env.get(node.id), _ObjRef):
+            return self.env[node.id]
+        return None
+
     def visit_Attribute(self, node: ast.Attribute) -> ast.expr:
-        if isinstance(node.value, ast.Name) and isinstance(self.env.get(node.value.id), _SelfRef):
-            name = f"self__{node.attr}"
-            if name not in self.env:  # bound up front, unless a write has since changed it
-                self.env[name] = self.env[node.value.id].value(node.attr)
-            return ast.Name(id=name, ctx=ast.Load())
-        return self.generic_visit(node)
+        if isinstance(node.value, ast.Name) and isinstance(self.env.get(node.value.id), _Record):
+            record = self.env[node.value.id]
+            if node.attr not in record.fields:
+                raise UnsupportedConstructError(f"'{node.value.id}.{node.attr}' is not a field of the record")
+            return ast.Name(id=f"{node.value.id}.{node.attr}", ctx=ast.Load())
+        obj = self._object(node.value)
+        if obj is None:
+            return self.generic_visit(node)
+        if node.attr in obj.overridable:
+            raise UnsupportedConstructError(
+                f"'{obj.label}.{node.attr}' may be overridden by a subclass, so it is not modelled")
+        if node.attr in obj.properties:
+            return node  # a property is a call with no arguments; see _ContainerRewriter.visit_Attribute
+        if node.attr in obj.methods:
+            if node.attr in obj.fields:
+                obj.kind(node.attr)  # raises: a name that is both a field and a method is not modelled
+            raise UnsupportedConstructError(f"method '{obj.label}.{node.attr}' used as a value is not modelled")
+        name = f"{obj.prefix}{node.attr}"
+        if name not in self.env:  # bound up front, unless a write has since changed it
+            self.env[name] = obj.value(node.attr)
+        return ast.Name(id=name, ctx=ast.Load())
+
+    def _argument(self, node: ast.expr) -> ast.expr:
+        # An object passed as an argument is handed on to the callee, not read as a value.
+        return node if self._object(node) is not None else self.visit(node)
+
+    def visit_Call(self, node: ast.Call) -> ast.expr:
+        func = node.func
+        obj = self._object(func.value) if isinstance(func, ast.Attribute) else None
+        node.args = [self._argument(a) for a in node.args]
+        node.keywords = [self.visit(k) for k in node.keywords]
+        if obj is not None and func.attr in obj.methods and func.attr not in obj.properties:
+            if func.attr in obj.overridable:
+                raise UnsupportedConstructError(
+                    f"'{obj.label}.{func.attr}' may be overridden by a subclass, so it is not modelled")
+            return node  # the call itself is for the call model
+        node.func = self.visit(func)
+        return node
 
     def visit_Name(self, node: ast.Name) -> ast.expr:
-        if isinstance(self.env.get(node.id), _SelfRef):
+        if self._object(node) is not None:
             raise UnsupportedConstructError(
-                "'self' used as a value (only reads of self.field are modelled)")
+                f"'{node.id}' used as a value (only reads of its fields and calls of its methods are modelled)")
         return node
 
 
@@ -759,7 +977,255 @@ class _ContainerRewriter(ast.NodeTransformer):
             return self.env[node.id]
         return None
 
+    def _scope_class(self, name: str) -> Optional[ast.ClassDef]:
+        scope = self.env.get(_SCOPE_KEY)
+        return scope.class_def(name) if scope is not None else None
+
+    # --- class and call models -------------------------------------------------
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.expr:
+        if isinstance(node.value, ast.Name):
+            obj = self.env.get(node.value.id)
+            if isinstance(obj, _ObjRef) and node.attr in obj.properties:
+                return self._bind(self._inline(obj.methods[node.attr], obj, [], node))
+            if node.value.id not in self.env:
+                cls = self._scope_class(node.value.id)
+                if cls is not None:
+                    return self._bind(_class_attribute_term(cls, node.attr))
+        return self.generic_visit(node)
+
+    def _call_target(self, node: ast.Call) -> Optional[Tuple[ast.FunctionDef, Optional[_ObjRef]]]:
+        """The function a call invokes, with the object it is called on, if the call model applies.
+
+        A call to a function the scope defines, or to a method of an object (self or a
+        parameter). A property is not a call target: its value is read as an attribute."""
+        scope = self.env.get(_SCOPE_KEY)
+        if scope is None:
+            return None
+        func = node.func
+        if isinstance(func, ast.Name) and func.id not in self.env:
+            fn = scope.function_def(func.id)
+            return (fn, None) if fn is not None else None
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            obj = self.env.get(func.value.id)
+            if isinstance(obj, _ObjRef) and func.attr in obj.methods and func.attr not in obj.properties:
+                return (obj.methods[func.attr], obj)
+        return None
+
+    def _argument(self, kind: Any, node: ast.expr) -> Any:
+        """The value a call passes for a parameter of this kind. Containers and objects are
+        passed as themselves, so the callee sees the same object the caller does."""
+        if isinstance(kind, tuple) and kind[0] == "obj":
+            obj = self.env.get(node.id) if isinstance(node, ast.Name) else None
+            if not isinstance(obj, _ObjRef) or obj.classdef is not kind[1]:
+                raise UnsupportedConstructError("an object parameter needs an object of the same class")
+            return obj
+        if isinstance(kind, tuple) and kind[0] == "enum":
+            value = _enum_operand(node, self.env)
+            if value is None or value.classdef is not kind[1]:
+                raise UnsupportedConstructError("an enum parameter needs a value of the same enum")
+            return value
+        if isinstance(kind, tuple) and kind[0] == "list":
+            if isinstance(node, ast.List):
+                return _list_literal_value(node, self.env)
+            if isinstance(self._container(node), _Seq):
+                return self._container(node)
+            raise UnsupportedConstructError("a list parameter needs a list")
+        if isinstance(kind, tuple) and kind[0] == "dict":
+            if isinstance(self._container(node), _Map):
+                return self._container(node)
+            raise UnsupportedConstructError("a dict parameter needs a dict")
+        if isinstance(kind, tuple) and kind[0] == "opt":
+            if isinstance(node, ast.Constant) and node.value is None:
+                return _Opt(z3.BoolVal(True), _DEFAULTS[kind[1]]())
+            if isinstance(node, ast.Name) and isinstance(self.env.get(node.id), _Opt):
+                return self.env[node.id]
+            term = _coerce(_as_z3_value(_expr_to_z3_safe(node, self.env)), kind[1])
+            return _Opt(z3.BoolVal(False), term)
+        return _coerce(_as_z3_value(_expr_to_z3_safe(node, self.env)), kind)
+
+    def _default(self, kind: Any, node: ast.expr) -> Any:
+        """The value of a parameter the call leaves to its default, which must be a literal,
+        or a member of the enum for an enum parameter."""
+        if isinstance(kind, tuple) and kind[0] == "enum":
+            value = _enum_operand(node, self.env)
+            if value is None or value.classdef is not kind[1]:
+                raise UnsupportedConstructError("an enum default must be a member of that enum")
+            return value
+        if not isinstance(node, ast.Constant):
+            raise UnsupportedConstructError("only a literal default value is modelled")
+        if isinstance(kind, tuple) and kind[0] == "opt":
+            if node.value is None:
+                return _Opt(z3.BoolVal(True), _DEFAULTS[kind[1]]())
+            return _Opt(z3.BoolVal(False), _coerce(_literal_term(node.value), kind[1]))
+        if node.value is None or isinstance(kind, tuple):
+            raise UnsupportedConstructError("only a literal default value is modelled")
+        return _coerce(_literal_term(node.value), kind)
+
+    def _bind_fields(self, callee: Dict[str, Any], func_node: ast.FunctionDef, name: str, obj: _ObjRef) -> None:
+        """Bind the fields the callee reads through `name` to the values the caller sees now.
+
+        A caller that wrote a field has the new value in its environment, so a call made
+        after the write must read that value, not the one the object started with."""
+        for attr in sorted(_attributes_on(func_node.body, name)):
+            if attr in obj.methods or attr in obj.properties:
+                continue
+            kind = obj.fields.get(attr)
+            if kind is None or (isinstance(kind, str) and kind.startswith("!")) or (
+                    isinstance(kind, tuple) and kind[0] == "obj"):
+                continue  # reading it raises inside the callee, which is where the reason belongs
+            key = f"{obj.prefix}{attr}"
+            callee[key] = self.env[key] if key in self.env else obj.value(attr)
+
+    def _bind_params(self, name: str, params: List[Tuple[str, Any, Optional[ast.expr]]],
+                     arg_nodes: List[ast.expr], keywords: List[ast.keyword]) -> Dict[str, Any]:
+        """Bind a call's arguments to its parameters. `params` lists (name, kind, default)
+        in order, where default is None for a parameter that must be passed. Positional
+        arguments fill the parameters in order, and keywords name theirs."""
+        kinds = {pname: kind for pname, kind, _ in params}
+        if len(arg_nodes) > len(params):
+            raise UnsupportedConstructError(f"too many arguments in a call to '{name}'")
+        bound: Dict[str, Any] = {}
+        for (pname, kind, _), node in zip(params, arg_nodes):
+            bound[pname] = self._argument(kind, node)
+        for kw in keywords:
+            if kw.arg is None or kw.arg not in kinds:
+                raise UnsupportedConstructError(f"a keyword argument in a call to '{name}' names no parameter")
+            if kw.arg in bound:
+                raise UnsupportedConstructError(f"'{kw.arg}' is passed twice in a call to '{name}'")
+            bound[kw.arg] = self._argument(kinds[kw.arg], kw.value)
+        for pname, kind, default in params:
+            if pname in bound:
+                continue
+            if default is None:
+                raise UnsupportedConstructError(f"a call to '{name}' does not pass '{pname}'")
+            bound[pname] = self._default(kind, default)
+        return bound
+
+    def construct(self, node: ast.Call) -> _Record:
+        """The record a constructor call makes: the values of the dataclass's declared fields.
+
+        With no __init__, the declared fields are the parameters, in order, and a field
+        with a default takes it. With an __init__, it runs on a fresh object, and the
+        fields it sets are the record. A field it does not set takes its class default.
+        The __init__ may not read a field, since a field read before it is set is not a
+        value the model can give.
+        """
+        scope = self.env.get(_SCOPE_KEY)
+        classdef = scope.class_def(node.func.id)
+        _dataclass_check(classdef)
+        fields = _class_fields(classdef, scope)
+        declared = _declared_fields(classdef)
+        for field_name, _, _ in declared:
+            kind = fields.get(field_name)
+            if not (kind in _SCALAR_SORTS or (isinstance(kind, tuple) and kind[0] == "enum")):
+                raise UnsupportedConstructError(
+                    f"field '{classdef.name}.{field_name}' is not a scalar or an enum, so the record is not modelled")
+        init = _own_init(classdef)
+        if init is None:
+            bound = self._bind_params(classdef.name, [
+                (field_name, fields[field_name], default) for field_name, _, default in declared
+            ], node.args, node.keywords)
+            return _Record(classdef, bound)
+
+        args = init.args
+        if args.vararg or args.kwarg or args.kwonlyargs or args.posonlyargs or not args.args:
+            raise UnsupportedConstructError(f"the __init__ of '{classdef.name}' has parameters that are not modelled")
+        self_name = args.args[0].arg
+        if any(isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load)
+               and isinstance(n.value, ast.Name) and n.value.id == self_name
+               for n in ast.walk(ast.Module(body=list(init.body), type_ignores=[]))):
+            raise UnsupportedConstructError(f"the __init__ of '{classdef.name}' reads a field before setting it")
+        defaults = dict(zip((p.arg for p in args.args[len(args.args) - len(args.defaults):]), args.defaults))
+        bound = self._bind_params(classdef.name, [
+            (p.arg, _param_kind(p, init.body, scope), defaults.get(p.arg)) for p in args.args[1:]
+        ], node.args, node.keywords)
+
+        callee: Dict[str, Any] = {
+            _PATH_KEY: _path_of(self.env),
+            _FACTS_KEY: self.env.setdefault(_FACTS_KEY, []),
+            _SCOPE_KEY: scope,
+            _CALL_STACK_KEY: self.env.get(_CALL_STACK_KEY, ()) + (f"{classdef.name}.__init__",),
+            _MAX_UNROLL_KEY: self.env.get(_MAX_UNROLL_KEY, DEFAULT_MAX_UNROLL),
+            self_name: _ObjRef(fields, {}, self.env.setdefault(_FACTS_KEY, []),
+                               classdef=classdef, scope=scope, is_self=True),
+        }
+        callee.update(bound)
+        flow = _exec_stmts(list(init.body), callee, callee[_MAX_UNROLL_KEY])
+        if flow[0] != "fallthrough":
+            raise UnsupportedConstructError(f"the __init__ of '{classdef.name}' returns or raises")
+        values: Dict[str, Any] = {}
+        for field_name, _, default in declared:
+            key = f"self__{field_name}"
+            if key in flow[1]:
+                values[field_name] = flow[1][key]
+            elif default is not None:
+                values[field_name] = self._default(fields[field_name], default)
+            else:
+                raise UnsupportedConstructError(
+                    f"the __init__ of '{classdef.name}' does not set '{field_name}'")
+        return _Record(classdef, values)
+
+    def _inline(self, func_node: ast.FunctionDef, obj: Optional[_ObjRef], arg_nodes: List[ast.expr],
+                call_node: ast.AST) -> Any:
+        """The value of a call, from executing the callee's body with its arguments bound.
+
+        The callee sees only its parameters, its own locals and the fields of the objects
+        it is given, at the values the caller sees. It cannot see the caller's locals, so
+        a name it does not bind is still rejected. A call that writes a field, recurses,
+        raises or does not return on every path is not modelled.
+        """
+        name = func_node.name
+        stack = self.env.get(_CALL_STACK_KEY, ())
+        if name in stack or len(stack) >= MAX_CALL_DEPTH:
+            raise UnsupportedConstructError(f"recursive or deeply nested call to '{name}' is not modelled")
+        if any(_base_name(d) in ("staticmethod", "classmethod") for d in func_node.decorator_list):
+            raise UnsupportedConstructError(f"'{name}' is a static or class method, which is not modelled")
+        if any(_base_name(d) != "property" for d in func_node.decorator_list):
+            # Any other decorator may replace the body, so the body is not what runs.
+            raise UnsupportedConstructError(f"'{name}' is decorated, and a decorator is not modelled")
+        if getattr(call_node, "keywords", None):
+            raise UnsupportedConstructError(f"keyword arguments in a call to '{name}' are not modelled")
+        args = func_node.args
+        if args.vararg or args.kwarg or args.kwonlyargs or args.posonlyargs:
+            raise UnsupportedConstructError(f"'{name}' has variable or keyword-only parameters, which are not modelled")
+        if any(_writes_fields(func_node, a.arg) for a in args.args):
+            raise UnsupportedConstructError(f"'{name}' writes a field, which a call does not model")
+
+        params = args.args
+        if obj is not None and not params:
+            raise UnsupportedConstructError(f"method '{name}' has no self parameter")
+        bound: Dict[str, Any] = {params[0].arg: obj} if obj is not None else {}
+        callee_params = params[1:] if obj is not None else params
+        scope = self.env.get(_SCOPE_KEY)
+        defaults = dict(zip((p.arg for p in params[len(params) - len(args.defaults):]), args.defaults))
+        bound.update(self._bind_params(name, [
+            (p.arg, _param_kind(p, func_node.body, scope), defaults.get(p.arg)) for p in callee_params
+        ], arg_nodes, []))
+
+        callee: Dict[str, Any] = {
+            _PATH_KEY: _path_of(self.env),  # the call runs only where the caller reaches it
+            _FACTS_KEY: self.env.setdefault(_FACTS_KEY, []),  # domain restrictions are the caller's
+            _SCOPE_KEY: scope,
+            _CALL_STACK_KEY: stack + (name,),
+            _MAX_UNROLL_KEY: self.env.get(_MAX_UNROLL_KEY, DEFAULT_MAX_UNROLL),
+        }
+        callee.update(bound)
+        for pname, value in bound.items():
+            if isinstance(value, _ObjRef):
+                self._bind_fields(callee, func_node, pname, value)
+        flow = _exec_stmts(list(func_node.body), callee, callee[_MAX_UNROLL_KEY])
+        if flow[0] != "return":
+            raise UnsupportedConstructError(
+                f"a call to '{name}' may raise or fall off its end, so its value is not modelled")
+        if isinstance(flow[1], _Record):
+            raise UnsupportedConstructError(f"a call to '{name}' returns an object, which only a return can give")
+        return _as_z3_value(flow[1])
+
     def visit_Name(self, node: ast.Name) -> ast.expr:
+        if isinstance(self.env.get(node.id), _Record):
+            raise UnsupportedConstructError(
+                f"'{node.id}' is an object built by a constructor, used as a value only as a whole return")
         if node.id.startswith(_TEMP_PREFIX) and not getattr(node, "is_temp", False):
             raise UnsupportedConstructError(f"name '{node.id}' is reserved")
         if isinstance(self.env.get(node.id), _Unbound):
@@ -767,6 +1233,11 @@ class _ContainerRewriter(ast.NodeTransformer):
                 f"'{node.id}' may be unbound here (it is the target of a loop over a container)")
         if isinstance(self.env.get(node.id), _Opaque):
             raise UnsupportedConstructError(f"'{node.id}' is an imported name, which is not modelled")
+        if isinstance(self.env.get(node.id), _Enum):
+            raise UnsupportedConstructError(
+                f"'{node.id}' is an enum value, which is only modelled in comparisons with a member")
+        if node.id not in self.env and self._scope_class(node.id) is not None:
+            raise UnsupportedConstructError(f"class '{node.id}' used as a value is not modelled")
         if (node.id not in self.env and node.id not in _MODELLED_BUILTINS
                 and not self.env.get(_EXPRESSION_KEY)):
             # A free name would be read as an unknown integer, but it is a global or a
@@ -873,6 +1344,13 @@ class _ContainerRewriter(ast.NodeTransformer):
                 return self._bind(c.length)
             if isinstance(c, _Map):
                 raise UnsupportedConstructError("len() of a dict is not modelled")
+        if _is_constructor_call(node, self.env):
+            raise UnsupportedConstructError(
+                "a constructor call is modelled only as a whole return or an assigned value")
+        target = self._call_target(node)
+        if target is not None:
+            func_node, obj = target
+            return self._bind(self._inline(func_node, obj, node.args, node))
         return self.generic_visit(node)
 
     def visit_BinOp(self, node: ast.BinOp) -> ast.expr:
@@ -890,6 +1368,17 @@ class _ContainerRewriter(ast.NodeTransformer):
         return self.generic_visit(node)
 
     def visit_Compare(self, node: ast.Compare) -> ast.expr:
+        if len(node.ops) == 1 and isinstance(node.ops[0], (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)):
+            left = _enum_operand(node.left, self.env)
+            right = _enum_operand(node.comparators[0], self.env)
+            if left is not None or right is not None:
+                # Members are compared by identity: two members of one enum are equal only
+                # if they are the same member, and members of different enums never are.
+                if left is None or right is None:
+                    raise UnsupportedConstructError("an enum value is only modelled as compared with an enum value")
+                same = left.classdef is right.classdef
+                equal = (left.term == right.term) if same else z3.BoolVal(False)
+                return self._bind(equal if isinstance(node.ops[0], (ast.Is, ast.Eq)) else z3.Not(equal))
         if (len(node.ops) == 1 and isinstance(node.ops[0], (ast.In, ast.NotIn))
                 and isinstance(node.comparators[0], ast.List)):
             # `x in [a, b]` is `x == a or x == b`, for scalar elements
@@ -922,6 +1411,178 @@ def _as_z3_value(v: Any) -> Any:
     if isinstance(v, z3.ExprRef):
         return v
     raise UnsupportedConstructError(f"value of type {type(v).__name__} has no Z3 sort")
+
+
+_SCALAR_SORTS = {"int": z3.IntSort, "bool": z3.BoolSort, "str": z3.StringSort, "float": z3.RealSort}
+
+
+def _literal_term(value: Any) -> Any:
+    """A Python literal from a default value or a class attribute, as a Z3 term."""
+    if isinstance(value, bool):
+        return z3.BoolVal(value)
+    if isinstance(value, int):
+        return z3.IntVal(value)
+    if isinstance(value, float):
+        return z3.RealVal(value)
+    if isinstance(value, str):
+        return z3.StringVal(value)
+    raise UnsupportedConstructError(f"literal {value!r} is not modelled")
+
+
+def _coerce(term: Any, kind: Any) -> Any:
+    """A value passed for a parameter of scalar kind: an int may widen to a float, and any
+    other sort mismatch is rejected, since Python would pass the value unchanged."""
+    if kind == "unused":
+        return term
+    if kind == "float" and term.sort() == z3.IntSort():
+        return z3.ToReal(term)
+    if term.sort() != _SCALAR_SORTS[kind]():
+        raise UnsupportedConstructError(
+            f"a value of sort {term.sort()} is passed for a parameter of type {kind}")
+    return term
+
+
+def _enum_operand(node: ast.expr, env: Dict[str, Any]) -> Optional[_Enum]:
+    """The enum value an operand denotes: a name bound to one, a member of an enum class
+    the scope defines, or a conditional between two enum values. None for any other operand."""
+    if isinstance(node, ast.Name) and isinstance(env.get(node.id), _Enum):
+        return env[node.id]
+    if isinstance(node, ast.IfExp):
+        cond = _expr_to_z3_safe(node.test, env)
+        if not isinstance(cond, z3.BoolRef):
+            raise UnsupportedConstructError("a conditional expression's test must be a boolean")
+        then_value, else_value = _enum_operand(node.body, env), _enum_operand(node.orelse, env)
+        if then_value is None or else_value is None or then_value.classdef is not else_value.classdef:
+            raise UnsupportedConstructError("a conditional between enum values needs two members of one enum")
+        return _Enum(then_value.classdef, z3.If(cond, then_value.term, else_value.term))
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id not in env:
+        scope = env.get(_SCOPE_KEY)
+        cls = scope.class_def(node.value.id) if scope is not None else None
+        members = _enum_members(cls) if cls is not None else None
+        if members is not None:
+            if node.attr not in members:
+                raise UnsupportedConstructError(f"'{node.value.id}.{node.attr}' is not a member of the enum")
+            return _Enum(cls, z3.IntVal(members[node.attr]))
+    return None
+
+
+def _class_attribute_term(cls: ast.ClassDef, attr: str) -> Any:
+    """The value of `Cls.attr` when the class assigns it a literal. An enum member is a
+    value of the enum, which only a comparison can use."""
+    if (_enum_members(cls) or {}).get(attr) is not None:
+        raise UnsupportedConstructError(
+            f"enum member '{cls.name}.{attr}' is only modelled in a comparison with an enum value")
+    assigns = [s for s in cls.body if isinstance(s, ast.Assign) and len(s.targets) == 1
+               and isinstance(s.targets[0], ast.Name) and s.targets[0].id == attr]
+    if len(assigns) == 1 and isinstance(assigns[0].value, ast.Constant) and assigns[0].value.value is not None:
+        return _literal_term(assigns[0].value.value)
+    raise UnsupportedConstructError(f"class attribute '{cls.name}.{attr}' is not a literal, so it is not modelled")
+
+
+def _dataclass_check(classdef: ast.ClassDef) -> None:
+    """Raise unless the class is a dataclass whose `==` is the comparison of its fields.
+
+    A plain class compares by identity, and `eq=False` makes a dataclass do so too, so
+    neither is modelled. A base class, or a __post_init__, could add to or change the
+    fields, and a class's own __eq__ replaces the comparison, so none is modelled either."""
+    decorators = [d for d in classdef.decorator_list if _name_of(d.func if isinstance(d, ast.Call) else d) == "dataclass"]
+    if not decorators:
+        raise UnsupportedConstructError(
+            f"class '{classdef.name}' is not a dataclass, and only a dataclass is compared by its fields")
+    for d in decorators:
+        if isinstance(d, ast.Call) and any(k.arg == "eq" and not (isinstance(k.value, ast.Constant) and k.value.value)
+                                           for k in d.keywords):
+            raise UnsupportedConstructError(f"dataclass '{classdef.name}' is not compared by its fields (eq=False)")
+    if classdef.bases:
+        raise UnsupportedConstructError(f"dataclass '{classdef.name}' has a base class, which is not modelled")
+    if any(isinstance(s, ast.FunctionDef) and s.name == "__post_init__" for s in classdef.body):
+        raise UnsupportedConstructError(f"dataclass '{classdef.name}' has __post_init__, which is not modelled")
+    if any(isinstance(s, ast.FunctionDef) and s.name == "__eq__" for s in classdef.body):
+        raise UnsupportedConstructError(f"dataclass '{classdef.name}' defines __eq__, so it is not compared by its fields")
+
+
+def _declared_fields(classdef: ast.ClassDef) -> List[Tuple[str, ast.expr, Optional[ast.expr]]]:
+    """The fields a dataclass declares, in order: (name, annotation, default or None).
+    A default made by field(default=...) is its value. A factory default is not modelled."""
+    out = []
+    for stmt in classdef.body:
+        if not (isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)):
+            continue
+        if _name_of(stmt.annotation) == "ClassVar":
+            continue
+        default = stmt.value
+        if isinstance(default, ast.Call) and _name_of(default.func) == "field":
+            options = {k.arg: k.value for k in default.keywords}
+            if default.args or set(options) - {"default"}:
+                raise UnsupportedConstructError(
+                    f"field '{stmt.target.id}' uses field() options that are not modelled")
+            default = options.get("default")
+        out.append((stmt.target.id, stmt.annotation, default))
+    return out
+
+
+def _own_init(classdef: ast.ClassDef) -> Optional[ast.FunctionDef]:
+    inits = [s for s in classdef.body if isinstance(s, ast.FunctionDef) and s.name == "__init__"]
+    if len(inits) > 1 or (inits and inits[0].decorator_list):
+        raise UnsupportedConstructError(f"class '{classdef.name}' has an __init__ that is not modelled")
+    return inits[0] if inits else None
+
+
+def _is_constructor_call(node: ast.expr, env: Dict[str, Any]) -> bool:
+    scope = env.get(_SCOPE_KEY)
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id not in env
+            and scope is not None and scope.class_def(node.func.id) is not None)
+
+
+def _record_of(node: ast.expr, env: Dict[str, Any]) -> Optional[_Record]:
+    """The record a value is, when it is a constructor call or a name bound to a record."""
+    if isinstance(node, ast.Name) and isinstance(env.get(node.id), _Record):
+        return env[node.id]
+    if _is_constructor_call(node, env):
+        return _ContainerRewriter(env).construct(node)
+    return None
+
+
+def _bind_record(env: Dict[str, Any], name: str, record: _Record) -> None:
+    """Bind a name to a record, and each of its fields as `name.field`, which reads use."""
+    env[name] = record
+    for field_name, term in record.fields.items():
+        env[f"{name}.{field_name}"] = term
+
+
+def _select(cond: Any, a: Any, b: Any) -> Any:
+    """`a` where cond holds and `b` elsewhere: a Z3 term, or a record if both are records."""
+    if isinstance(a, _Record) and isinstance(b, _Record):
+        if a.classdef is not b.classdef:
+            raise UnsupportedConstructError("the two branches return objects of different classes")
+        return _Record(a.classdef, {f: _field_select(cond, a.fields[f], b.fields[f]) for f in a.fields})
+    return z3.If(cond, _as_z3_value(a), _as_z3_value(b))
+
+
+def _field_equal(x: Any, y: Any) -> Any:
+    """Equality of two field values: enum members by identity, and terms by value."""
+    if isinstance(x, _Enum) or isinstance(y, _Enum):
+        if not (isinstance(x, _Enum) and isinstance(y, _Enum)) or x.classdef is not y.classdef:
+            return z3.BoolVal(False)  # members of different enums, or an enum and a number, are never equal
+        return x.term == y.term
+    return x == y
+
+
+def _field_select(cond: Any, x: Any, y: Any) -> Any:
+    if isinstance(x, _Enum) or isinstance(y, _Enum):
+        if not (isinstance(x, _Enum) and isinstance(y, _Enum) and x.classdef is y.classdef):
+            raise UnsupportedConstructError("a field takes an enum value on one branch and another value on the other")
+        return _Enum(x.classdef, z3.If(cond, x.term, y.term))
+    return z3.If(cond, x, y)
+
+
+def _same_result(a: Any, b: Any) -> Any:
+    """The condition under which two results are equal. Records are equal when every field is."""
+    if isinstance(a, _Record) or isinstance(b, _Record):
+        if not (isinstance(a, _Record) and isinstance(b, _Record)) or a.classdef is not b.classdef:
+            raise UnsupportedConstructError("the two functions return objects of different classes, or an object on one side only")
+        return z3.And(*[_field_equal(a.fields[f], b.fields[f]) for f in a.fields]) if a.fields else z3.BoolVal(True)
+    return _as_z3_value(a) == _as_z3_value(b)
 
 
 def _list_literal_value(node: ast.List, env: Dict[str, Any]) -> _Seq:
@@ -1029,7 +1690,7 @@ def _branch_flows(cond, then_flow, then_env, else_flow, else_env, env, rest, max
     if else_flow[0] == "raised":
         return then_flow if then_flow[0] == "return" else _exec_stmts(rest, then_env, max_unroll)
     if then_flow[0] == "return" and else_flow[0] == "return":
-        return ("return", z3.If(cond, then_flow[1], else_flow[1]))
+        return ("return", _select(cond, then_flow[1], else_flow[1]))
 
     if then_flow[0] == "fallthrough" and else_flow[0] == "fallthrough":
         env.update(_merge_envs(cond, then_env, else_env, env))
@@ -1051,7 +1712,7 @@ def _branch_flows(cond, then_flow, then_env, else_flow, else_env, env, rest, max
             raise UnsupportedConstructError(
                 "function does not return a value on every path"
             )
-        return ("return", z3.If(cond, then_flow[1], remainder[1]))
+        return ("return", _select(cond, then_flow[1], remainder[1]))
 
     if then_flow[0] == "fallthrough" and else_flow[0] == "return":
         remainder = _exec_stmts(rest, then_env, max_unroll)
@@ -1061,7 +1722,7 @@ def _branch_flows(cond, then_flow, then_env, else_flow, else_env, env, rest, max
             raise UnsupportedConstructError(
                 "function does not return a value on every path"
             )
-        return ("return", z3.If(cond, remainder[1], else_flow[1]))
+        return ("return", _select(cond, remainder[1], else_flow[1]))
 
     raise UnsupportedConstructError("unreachable if/else flow combination")
 
@@ -1156,7 +1817,17 @@ def _is_self_field_write(stmt: ast.Assign, env: Dict[str, Any]) -> bool:
     targets = t.elts if isinstance(t, ast.Tuple) else [t]
     return bool(targets) and all(
         isinstance(x, ast.Attribute) and isinstance(x.value, ast.Name)
-        and isinstance(env.get(x.value.id), _SelfRef) for x in targets)
+        and isinstance(env.get(x.value.id), _ObjRef) and env[x.value.id].is_self for x in targets)
+
+
+def _field_value(kind: Any, node: ast.expr, env: Dict[str, Any]) -> Any:
+    """The value assigned to a field of this kind: an enum member, or a Z3 term."""
+    if isinstance(kind, tuple) and kind[0] == "enum":
+        value = _enum_operand(node, env)
+        if value is None:
+            raise UnsupportedConstructError("an enum field is assigned a member of its enum, or nothing modelled")
+        return value
+    return _expr_to_z3_safe(node, env)
 
 
 def _write_self_fields(stmt: ast.Assign, env: Dict[str, Any]) -> None:
@@ -1170,9 +1841,15 @@ def _write_self_fields(stmt: ast.Assign, env: Dict[str, Any]) -> None:
         exprs = list(stmt.value.elts)
     else:
         exprs = [stmt.value]
-    values = [_expr_to_z3_safe(e, env) for e in exprs]  # every right-hand side before any write
+    # every right-hand side is evaluated before any write
+    values = [_field_value(env[t.value.id].kind(t.attr), e, env) for t, e in zip(targets, exprs)]
     for target, value in zip(targets, values):
         kind = env[target.value.id].kind(target.attr)
+        if isinstance(kind, tuple) and kind[0] == "enum":
+            if not isinstance(value, _Enum) or value.classdef is not kind[1]:
+                raise UnsupportedConstructError(f"'self.{target.attr}' is an enum but is assigned another value")
+            env[f"self__{target.attr}"] = value
+            continue
         if kind not in _SCALAR_FIELD_KINDS:
             raise UnsupportedConstructError(
                 f"writes to 'self.{target.attr}' ({kind}) are not modelled: only scalar fields are written")
@@ -1194,7 +1871,8 @@ def _exec_stmts(
         if isinstance(stmt, ast.Return):
             if stmt.value is None:
                 raise UnsupportedConstructError("bare 'return' (no value)")
-            value = _expr_to_z3_safe(stmt.value, env)
+            record = _record_of(stmt.value, env)
+            value = record if record is not None else _expr_to_z3_safe(stmt.value, env)
             exits = env.get(_EXITS_KEY)
             if exits is not None:
                 state = {k: v for k, v in env.items() if k.startswith("self__") and isinstance(v, z3.ExprRef)}
@@ -1208,6 +1886,10 @@ def _exec_stmts(
                 raise UnsupportedConstructError(
                     "annotated assignment target must be a simple name"
                 )
+            record = _record_of(stmt.value, env)
+            if record is not None:
+                _bind_record(env, stmt.target.id, record)
+                continue
             env[stmt.target.id] = _expr_to_z3_safe(stmt.value, env)
             continue
 
@@ -1229,6 +1911,14 @@ def _exec_stmts(
             if (len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)
                     and isinstance(stmt.value, ast.List)):
                 env[stmt.targets[0].id] = _list_literal_value(stmt.value, env)
+                continue
+            enum_value = _enum_operand(stmt.value, env)
+            if enum_value is not None and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                env[stmt.targets[0].id] = enum_value  # an enum value is bound as itself, not as a term
+                continue
+            record = _record_of(stmt.value, env)
+            if record is not None and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                _bind_record(env, stmt.targets[0].id, record)
                 continue
             if all(isinstance(t, ast.Name) for t in stmt.targets):
                 value = _expr_to_z3_safe(stmt.value, env)
@@ -1375,19 +2065,23 @@ def _function_to_symbolic(
     inputs (required for a meaningful equivalence check). Facts that restrict
     the verified domain (see _unroll_container_loop) are appended to `facts`."""
     env = dict(shared_env)
+    scope = env.get(_SCOPE_KEY)
+    env[_FACTS_KEY] = facts if facts is not None else []
     for arg in func_node.args.args:
         if arg.arg not in env:
-            env[arg.arg] = _make_param(_param_kind(arg, func_node.body), arg.arg)
+            env[arg.arg] = _make_param(_param_kind(arg, func_node.body, scope), arg.arg, env[_FACTS_KEY], scope)
     _with_length_assumptions(env)
     env[_EXITS_KEY] = exits if exits is not None else []
     self_name = _self_name_of(func_node)
-    if self_name is not None and isinstance(env.get(self_name), _SelfRef):
+    if self_name is not None and isinstance(env.get(self_name), _ObjRef) and env[self_name].is_self:
         # Bind every field the method touches up front, so every branch sees all of
         # them and merges treat them alike.
+        obj = env[self_name]
         for attr in sorted(_self_attributes(func_node, self_name)):
-            env[f"self__{attr}"] = env[self_name].value(attr)
-    env[_FACTS_KEY] = facts if facts is not None else []
-    kinds = [_param_kind(a, func_node.body) for a in func_node.args.args]
+            if attr in obj.methods or attr in obj.properties:
+                continue  # a method or property is a call, not a field
+            env[f"self__{attr}"] = obj.value(attr)
+    kinds = [_param_kind(a, func_node.body, scope) for a in func_node.args.args]
     if any(k == "float" or (isinstance(k, tuple) and "float" in k) for k in kinds):
         env[_FACTS_KEY].append(_FLOAT_NOTE)
     if _inferred_bool_params(func_node):
@@ -1399,6 +2093,8 @@ def _function_to_symbolic(
         raise UnsupportedConstructError(
             "the function can end without returning a value (None), so there is no value to compare"
         )
+    if isinstance(flow[1], _Record):
+        return flow[1]  # a function that returns a constructed object; see verify_function_equivalence
     return _as_z3_value(flow[1])  # a constant-only body yields a Python literal
 
 
@@ -1442,12 +2138,19 @@ def verify_function_equivalence(
     code_b: str,
     func_b: str,
     max_unroll: int = DEFAULT_MAX_UNROLL,
+    scope: Any = None,
 ) -> EquivalenceResult:
     """Prove whether two functions compute the same return value for all
     inputs, within this module's supported subset (see module docstring).
     The two functions are matched positionally by parameter order, not by
     name — `func_a(x, y)` and `func_b(a, b)` are compared with `x`/`a` and
     `y`/`b` bound to the same symbolic variables.
+
+    `scope` resolves the classes and functions the code names (a ProjectScope
+    for the file, see project_index.py). Without it, only the definitions in each
+    code string are visible. A class-typed or enum parameter is shared only when
+    both functions name the same class definition, so keep both in one code string
+    or pass one scope; otherwise the two sides are reported as having different types.
     """
     if not Z3_AVAILABLE:
         return EquivalenceResult(status="unsupported", reason="z3-solver not installed")
@@ -1474,9 +2177,11 @@ def verify_function_equivalence(
             status="unsupported",
             reason="methods can only be compared with each other, within one class",
         )
+    scope_a = scope if scope is not None else _LocalScope(code_a)
+    scope_b = scope_a if scope is not None or code_a == code_b else _LocalScope(code_b)
     try:
-        kinds_a = [_param_kind(a, node_a.body) for a in node_a.args.args]
-        kinds_b = [_param_kind(b, node_b.body) for b in node_b.args.args]
+        kinds_a = [_param_kind(a, node_a.body, scope_a) for a in node_a.args.args]
+        kinds_b = [_param_kind(b, node_b.body, scope_b) for b in node_b.args.args]
     except UnsupportedConstructError as e:
         return EquivalenceResult(status="unsupported", reason=str(e))
     if kinds_a != kinds_b:
@@ -1484,17 +2189,20 @@ def verify_function_equivalence(
             status="unsupported",
             reason=f"parameter types differ: {kinds_a} versus {kinds_b}",
         )
-    shared_vars = [_make_param(kind, f"_arg{i}") for i, kind in enumerate(kinds_a)]
-    env_a = {name: var for name, var in zip(params_a, shared_vars)}
-    env_b = {name: var for name, var in zip(params_b, shared_vars)}
-
     facts_a: List[Any] = []
     facts_b: List[Any] = []
+    # Both sides read the same inputs, so an object or enum parameter is one value for both.
+    shared_vars = [_make_param(kind, f"_arg{i}", facts_a, scope_a) for i, kind in enumerate(kinds_a)]
+    env_a: Dict[str, Any] = {name: var for name, var in zip(params_a, shared_vars)}
+    env_b: Dict[str, Any] = {name: var for name, var in zip(params_b, shared_vars)}
+    env_a.update({_SCOPE_KEY: scope_a, _CALL_STACK_KEY: (func_a,), _MAX_UNROLL_KEY: max_unroll})
+    env_b.update({_SCOPE_KEY: scope_b, _CALL_STACK_KEY: (func_b,), _MAX_UNROLL_KEY: max_unroll})
+
     if owner_a is not None:
         # Both methods read the same object, so both sides share one cache of fields.
-        fields, cache = _class_fields(owner_a), {}
-        env_a[params_a[0]] = _SelfRef(fields, cache, facts_a)
-        env_b[params_b[0]] = _SelfRef(fields, cache, facts_b)
+        fields, cache = _class_fields(owner_a, scope_a), {}
+        env_a[params_a[0]] = _ObjRef(fields, cache, facts_a, classdef=owner_a, scope=scope_a, is_self=True)
+        env_b[params_b[0]] = _ObjRef(fields, cache, facts_b, classdef=owner_b, scope=scope_b, is_self=True)
     exits_a: List[Any] = []
     exits_b: List[Any] = []
     try:
@@ -1514,6 +2222,15 @@ def verify_function_equivalence(
     facts = facts_a + facts_b
     assume = z3.And(_input_assumptions(shared_vars), _assume_of(facts))
     claim_a, claim_b = result_a, result_b
+    is_record = isinstance(result_a, _Record) or isinstance(result_b, _Record)
+    if is_record or owner_a is not None:
+        try:
+            same_result = _same_result(result_a, result_b)
+        except UnsupportedConstructError as e:
+            return EquivalenceResult(status="unsupported", reason=str(e))
+    if is_record:
+        # Records are compared field by field. A claim about them is over the same fields.
+        claim_a, claim_b = z3.BoolVal(True), same_result
     if owner_a is not None:
         # Methods are equivalent when they return the same value and leave every field
         # in the same final state. Fields neither side writes keep their initial value.
@@ -1522,7 +2239,7 @@ def verify_function_equivalence(
             if not isinstance(cache[key], z3.ExprRef):
                 continue  # containers and optional fields are never written
             same_state.append(_final_field(exits_a, key, cache[key]) == _final_field(exits_b, key, cache[key]))
-        claim_a, claim_b = z3.BoolVal(True), z3.And(_as_z3_value(result_a) == _as_z3_value(result_b), *same_state)
+        claim_a, claim_b = z3.BoolVal(True), z3.And(same_result, *same_state)
     result = _prove_equal(claim_a, claim_b, assume)
     result.domain = _notes_of(facts)
     result.proof_a = str(result_a)
@@ -1536,12 +2253,49 @@ _Z3_PY_BINARY = {
 }
 
 
-def _z3_to_python(expr: Any, names: Optional[frozenset] = None) -> str:
-    """Render a Z3 expression as Python source over the same parameter names.
+def _is_scalar_term(value: Any) -> bool:
+    return isinstance(value, z3.ExprRef) and value.sort() in (
+        z3.IntSort(), z3.BoolSort(), z3.StringSort(), z3.RealSort())
 
-    `names` is the set of parameter names the output may refer to. A free
-    symbol outside it (e.g. the stand-in Z3 uses for len(x)) cannot be
-    rendered, so it raises instead of producing an unbound name.
+
+def _renderable_symbols(param_names: List[str], env: Dict[str, Any], self_name: Optional[str]) -> Dict[str, str]:
+    """Z3 symbols of scalar inputs and scalar fields, each mapped to the Python text that names it.
+
+    An enum value and a container are not scalars, so their symbols are absent and cannot
+    be rendered: an enum index written as an int would compare unequal to the member, and
+    a list length is not an attribute. A field is written `p.attr`, or `<self_name>.attr`
+    for the self of a method."""
+    out: Dict[str, str] = {}
+    for name in param_names:
+        value = env.get(name)
+        if _is_scalar_term(value) and z3.is_const(value):
+            out[value.decl().name()] = name
+    for value in env.values():
+        if isinstance(value, _ObjRef):
+            owner = self_name if value.is_self else value.label
+            for attr, term in value.cache.items():
+                if _is_scalar_term(term) and z3.is_const(term):
+                    out[term.decl().name()] = f"{owner}.{attr}"
+    return out
+
+
+def _render_symbol(symbol: str, names: Any) -> str:
+    """The Python text for a Z3 symbol, which must be one of `names`: a dict from symbol to
+    text, or a set of names that stand for themselves."""
+    if names is None:
+        return symbol
+    if symbol not in names:
+        raise UnsupportedConstructError(f"symbol '{symbol}' is not a scalar parameter or field")
+    return names[symbol] if isinstance(names, dict) else symbol
+
+
+def _z3_to_python(expr: Any, names: Any = None) -> str:
+    """Render a Z3 expression as Python source over the same names.
+
+    `names` says which symbols may appear, and how each is written (see
+    `_renderable_symbols`), or is a set of parameter names that stand for
+    themselves. A symbol outside it (e.g. the stand-in Z3 uses for len(x))
+    cannot be rendered, so it raises instead of producing an unbound name.
 
     Raises UnsupportedConstructError for any Z3 node this does not handle, so
     the caller can fall back to the Z3 string form instead of emitting wrong code.
@@ -1559,10 +2313,7 @@ def _z3_to_python(expr: Any, names: Optional[frozenset] = None) -> str:
         num, den = expr.numerator_as_long(), expr.denominator_as_long()
         return f"({num}/{den})"
     if z3.is_const(expr):
-        symbol = expr.decl().name()
-        if names is not None and symbol not in names:
-            raise UnsupportedConstructError(f"symbol '{symbol}' is not a parameter")
-        return symbol
+        return _render_symbol(expr.decl().name(), names)
 
     name = expr.decl().name()
     args = [_z3_to_python(expr.arg(i), names) for i in range(expr.num_args())]
@@ -1599,6 +2350,7 @@ def simplify_function(
     code: str,
     func_name: str,
     max_unroll: int = DEFAULT_MAX_UNROLL,
+    scope: Any = None,
 ) -> SimplificationResult:
     """Derive an algebraically simplified equivalent of a function's return
     value using Z3's own sound term-rewriting simplifier — a real
@@ -1619,15 +2371,18 @@ def simplify_function(
         return SimplificationResult(status="unsupported", reason=str(e))
 
     # Create the parameters here, so the input facts can be read back from them.
+    if scope is None:
+        scope = _LocalScope(code)
     facts: List[Any] = []
     owner = _method_owner(code, func_name, node.lineno)
-    env: Dict[str, Any] = {}
+    env: Dict[str, Any] = {_SCOPE_KEY: scope, _CALL_STACK_KEY: (func_name,), _MAX_UNROLL_KEY: max_unroll}
     try:
         for i, arg in enumerate(node.args.args):
             if i == 0 and owner is not None:
-                env[arg.arg] = _SelfRef(_class_fields(owner), {}, facts)
+                env[arg.arg] = _ObjRef(_class_fields(owner, scope), {}, facts,
+                                       classdef=owner, scope=scope, is_self=True)
             else:
-                env[arg.arg] = _make_param(_param_kind(arg, node.body), arg.arg)
+                env[arg.arg] = _make_param(_param_kind(arg, node.body, scope), arg.arg, facts, scope)
     except UnsupportedConstructError as e:
         return SimplificationResult(status="unsupported", reason=str(e))
     exits: List[Any] = []
@@ -1651,6 +2406,11 @@ def simplify_function(
             reason=f"construct could not be translated: {type(e).__name__}: {e}",
         )
 
+    if isinstance(original, _Record):
+        return SimplificationResult(
+            status="unsupported",
+            reason="the function returns an object, which is compared field by field "
+                   "(verify_function_equivalence) but has no single simplified expression")
     try:
         simplified = z3.simplify(original)
     except Exception as e:
@@ -1661,7 +2421,7 @@ def simplify_function(
     assumption = z3.And(_input_assumptions(list(env.values())), _assume_of(facts))
     domain = _notes_of(facts)
     self_name = _self_name_of(node)
-    if self_name is not None and _writes_fields(node, self_name) and isinstance(env.get(self_name), _SelfRef):
+    if self_name is not None and _writes_fields(node, self_name) and isinstance(env.get(self_name), _ObjRef):
         domain = "; ".join(x for x in (domain, _WRITES_NOTE) if x)
 
     # Z3 also reorders terms, e.g. "100 + a*50" becomes "100 + 50*a", which is
@@ -1680,7 +2440,8 @@ def simplify_function(
         )
 
     try:
-        simplified_python = _z3_to_python(simplified, frozenset(a.arg for a in node.args.args))
+        renderable = _renderable_symbols([a.arg for a in node.args.args], env, self_name)
+        simplified_python = _z3_to_python(simplified, renderable)
     except UnsupportedConstructError:
         simplified_python = None
 

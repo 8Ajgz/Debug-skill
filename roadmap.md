@@ -934,3 +934,92 @@ The top blockers are therefore dominated by annotations naming classes and by ca
 ### 22.5 Test suite
 
 New tests: `test_containers.py`, `test_container_loops.py`, `test_try_none_isinstance.py`, `test_floats_and_zero.py`, `test_object_fields.py`, `test_blockers_round.py`. Each construct is checked against Python on concrete inputs where the construct can be evaluated concretely. The full suite passes: 1195 tests, with the environment's `hypothesis` installed (the property-tester tests were failing only because it was missing).
+
+## §23. Class and call models: removing the class and call blockers from §22.4 (2026-10-20)
+
+### 23.1 What was built
+
+The simplifier in `src/pyprover/equivalence_verifier.py` now reads a class and a call instead of stopping at them. The rules, and what each one excludes:
+
+- **Objects.** A parameter, or a field, annotated with a class the code can reach is an object. Its scalar fields are symbols named `p.attr`, and its container fields are containers. An object is read-only: a method of the object that writes a field is not inlined, and a statement that writes a parameter's field is still rejected. A method's own `self` is the only writable object, as before.
+- **Enums.** A plain `Enum` subclass with distinct int or str literal members is a finite value. Its members are compared with `==`, `!=`, `is` and `is not`, and two members of one enum are equal only if they are the same member. An enum value cannot be returned, passed where an int is expected, or rendered as Python, because its Z3 form is a member index.
+- **Calls.** A call to a function the code can reach, or to a method of `self` or of an object, is inlined by symbolically executing the callee's body. The callee sees its parameters, its locals, and the fields of the objects it is given, at the values the caller sees (so a field written earlier in the caller is read as written). It cannot see the caller's locals. It is rejected if it writes a field, recurses (directly or through another call, to depth 8), is decorated, takes keyword or variable arguments, does not return on every path, or may raise.
+- **Properties.** A property read is a call with no arguments.
+- **Subclasses.** A method or field a subclass may override is not read on the base class, because the subclass's version could run. Subclasses are found by base-class name: across the repository when the scope is a `ProjectScope`, and in the analysed code alone otherwise (the domain of such a result says so).
+- **Scope.** Names are resolved through `src/pyprover/project_index.py` (`ProjectScope`). An import is followed inside the repository, through package `__init__` re-exports, with a hop limit. A name imported from outside the repository is not resolved.
+- **Rendering.** `simplified_python` renders scalar parameters and scalar fields as `p.attr` or `<self>.attr`. A list length, an enum, or a `None`-able value is not rendered, and falls back to the Z3 form.
+
+### 23.2 Census
+
+The census runs `simplify_function` on each function of the 83 non-test Python files in `src/` (`blocker_census.py`, kept in the scratch directory, not the repo, as §22.3 was). It deduplicates by name within a file, so it counts 656 functions where §22.3 counted 727 (different census, same files).
+
+Status: 656 functions before and after. Simplified 3, already minimal 9, unsupported 644 before and 644 after. No function reached a status it did not have, and no function crashed.
+
+The change shows in the first blocker of each unsupported function (`scratch_sim/measure.py`): a function that used to stop at a class is now stopped by a later construct, which is the intended effect.
+
+| Blocker (first reason) | Before | After |
+|---|---|---|
+| Parameter annotated with a project class | 70 | 0 |
+| Field annotated with a project class | 2 | 0 |
+| Free name that is a project function or class | 24 | 0 |
+| Field of unknown type | 128 | 104 |
+| Call not modelled (built-in method, e.g. `.lower()`) | 10 | 11 |
+| Object used as a value | 11 | 17 |
+
+The rises are functions that now get past the class annotation and stop at a later construct. "Object used as a value" holds class constructors (`UnifiedDebugReport(...)`), a `self` passed to other code, and containers, none of which is a class or call model.
+
+### 23.3 Blockers that remain, and why
+
+1. **Constructors** (`Cls(...)` on a project class): constructing an object needs a model of the new object's fields, which this model does not build.
+2. **Built-in methods** (`str.lower`, `str.split`, `list.append`, …): a string or container model is a separate piece of work. The §22.4 item 13 call blockers are of this kind.
+3. **Containers as values** and **`self` passed to unmodelled code**: unchanged from §22.4 items 3 and 11.
+4. **Nested objects** (a field of object type, such as `VerificationState.code_structure`): a field that holds an object is reported as not modelled. Modelling it needs prefixes for the field's own fields.
+5. **Module-level constants** (§22.4 item 7): not part of this change, which is about classes and calls.
+6. **Calls for effect** (§22.4 item 4): still rejected. A call that writes state the model does not represent cannot be inlined.
+
+### 23.4 Soundness
+
+Each rule that can make a claim is tested against Python on real inputs. The tests are in `src/pyprover/tests/test_class_and_call_models.py` (31 tests). A result that renders as Python is run on the original's inputs, with objects built from the class's fields and enum values taken from the real `Enum`. The tests also cover the rejections: a call that writes, a recursive call, a decorated call, a missing argument, a keyword argument, an object of the wrong class, an enum member used as a value, a subclass override, and a name the repository does not define.
+
+Two assumptions are recorded where they apply rather than hidden. An object parameter is the class it is annotated with, unless a subclass exists (see above). A function compared with another has the same class definition only if both come from one code string or one scope. Otherwise the two sides are reported as having different types.
+
+### 23.5 Test suite
+
+Full suite after the change: 1226 passed, 58 skipped, 1 deselected (§22.5 reported 1195 passed; the 31 new tests account for the difference).
+
+## §24. Records: dataclasses returned by a constructor call (2026-10-20)
+
+### 24.1 What was built
+
+A function that returns a dataclass built by a constructor call is now compared with another such function, field by field. Before, the constructor was an unsupported call.
+
+- **Which classes.** A class with `@dataclass` (or `@dataclass(...)` without `eq=False`), no base class, and no `__post_init__`. A plain class compares by identity, so it is not a record. A dataclass with `eq=False` is not compared by its fields either.
+- **Fields.** The declared fields, each a scalar (int, bool, float, str) or an enum. A container, object, or `field(default_factory=...)` field makes the record unsupported, because records hold no containers.
+- **Construction.** With no `__init__`, the declared fields are the parameters in order, and keywords name them. A field with a literal default, or an enum member default, may be left out. With its own `__init__`, the body runs on a fresh object, and the fields it sets are the record. A field it does not set takes its class default. The `__init__` may not read a field, since reading a field before it is set has no value the model can give.
+- **Use.** A record is returned directly, or bound to a name with each field as `name.field`, and read field by field. Records join across an `if` when both branches build one of the same class. A record is never a value inside an expression. A constructor call used as a value fails with a reason.
+- **Comparison.** Two records are equal when every field is equal. Enum fields compare by member identity. Records of different classes are never compared, and a function that returns a record on one side only is unsupported.
+- **Simplification.** `simplify_function` reports a record-valued function as unsupported. A record has no single simplified expression.
+
+Enum values gained two forms as a side effect: a conditional between two members (`Level.HIGH if x > 0 else Level.LOW`), and an assignment of a member to a field.
+
+### 24.2 Census
+
+Over the same 83 files, the record change moves no function's status. Simplified 3, already minimal 9, unsupported 666 before and after, no crashes. The "object used as a value" group falls from 17 to 7, and the 7 are containers and `self`. The constructor cases now stop at:
+
+| Blocker | Count |
+|---|---|
+| `field()` option such as `default_factory`, so a container field | 6 |
+| Plain class, compared by identity | 2 |
+| Constructor used inside an expression, such as `Cls(...).method()` | 2 |
+
+Those 10 are the designed limits, not gaps. Records of containers would need a container equality model, which is the next item of §23.3 (comprehensions and string joins).
+
+### 24.3 Assumptions and limits
+
+- A record's equality is the equality of its declared fields, which is Python's `==` for a dataclass with `eq` enabled. A dataclass that defines its own `__eq__`, or sets `eq=False`, is not compared, since either replaces that equality.
+- A record is compared only with a record of the same class, from the same scope. Two functions that construct the same class from two code strings are reported as different classes (§23.4 applies).
+- Records are returned and read; they are not mutated after construction.
+
+### 24.4 Test suite
+
+`src/pyprover/tests/test_records.py` (20 tests). Each claimed equivalence is also checked with Python's own `==` on the same inputs. Full pyprover suite: 840 passed.

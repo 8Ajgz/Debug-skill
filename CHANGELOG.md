@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- PyProver `simplify_function` / `verify_function_equivalence`: class and call models (roadmap §23). A parameter or field annotated with a class is read as a read-only object, its scalar and container fields are symbols, and a plain `Enum` with distinct literal members is a finite value compared by identity. A call to a function or method is inlined when its body is pure, undecorated, not recursive and returns on every path; a property is a call with no arguments. A method or field a subclass may override is not read. Classes and functions an import names are resolved through `src/pyprover/project_index.py` (`ProjectScope`), which follows imports and re-exports inside the repository. Without a scope, only the analysed code is visible, and the domain says that no subclass is assumed outside it. Results that render as Python are checked against the original on real objects and enum members in `src/pyprover/tests/test_class_and_call_models.py`.
+
+- PyProver `verify_function_equivalence`: a function that returns a dataclass built by a constructor call is compared field by field (roadmap §24). A record is built from the dataclass's declared fields, or by its own `__init__`, which runs on a fresh object. A field may be a scalar or an enum member. Records join across branches and can be bound to a name and read field by field. A plain class, `eq=False`, a class that defines `__eq__`, a base class, `__post_init__`, or a non-scalar field is not compared. `simplify_function` reports a record-valued function as unsupported, since a record has no single simplified expression.
+
 ### Fixed
 
 - Free names: a name that is neither a parameter nor a local (a module global, or a builtin other than `abs`, `min`, `max`, `len`, `isinstance` and `range`) was read as an unknown integer, so a function could be proven equivalent or simplified on a wrong model of that name. It is rejected now. Standalone expressions, which have free variables by design, are unchanged.
