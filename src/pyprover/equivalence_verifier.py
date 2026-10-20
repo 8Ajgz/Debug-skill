@@ -26,7 +26,13 @@ sound, things instead:
    computes, not a suggestion that still needs separate verification.
 
 SUPPORTED SUBSET (straight-line + branching, no loops in the general path):
-  - Assignment to a simple name: `x = <expr>`, `x += <expr>` etc.
+  - Assignment to simple names: `x = <expr>`, `x: int = <expr>`, `x += <expr>`,
+    `a = b = <expr>`, and tuple unpacking `a, b = <e1>, <e2>` (all right-hand
+    sides are evaluated before any name is bound, so `a, b = b, a` swaps)
+  - Integer powers with a literal exponent from 0 to MAX_POW_EXPONENT: `x ** 2`
+    is rewritten to `x * x` before translation
+  - Parameters annotated `bool` are Z3 Booleans, so `if flag:`, `not flag` and
+    `flag and x > 0` work. Unannotated parameters are Int (see below)
   - `if`/`elif`/`else` with `return` in (some) branches, including
     fall-through to a trailing return
   - Expressions: the same integer/boolean arithmetic `contract_verifier.py`
@@ -42,11 +48,12 @@ SUPPORTED SUBSET (straight-line + branching, no loops in the general path):
 NOT SUPPORTED, HONESTLY, NOT SILENTLY: function calls other than the
 built-in operators above, list/dict/string operations, recursion, unbounded
 or nested loops, mutation of aliased objects, generators, exceptions as
-control flow, multiple return values, or a bare boolean-typed variable used
-directly with and/or/not (e.g. `not flag`) — the reused `_expr_to_z3`
-always seeds an unbound name as a Z3 `Int`, so a bare boolean name conflicts
-with `Not()`; use an Int-typed comparison instead (e.g. `flag > 0`), which
-is unambiguously `Bool`-sorted. Hitting any of these raises
+control flow, multiple return values, float parameters (Python floats round,
+so an equality proven over the reals need not hold for floats), and a bare
+boolean used with and/or/not when its parameter is not annotated `bool`. The
+reused `_expr_to_z3` seeds an unannotated name as a Z3 `Int`, so `not flag`
+conflicts with `Not()`; annotate `flag: bool` or use an Int comparison (e.g.
+`flag > 0`). Hitting any of these raises
 `UnsupportedConstructError` with the specific construct named — this module
 never silently produces a false "equivalent" or a wrong "simplified" result
 for code it can't actually reason about. Compare
@@ -55,6 +62,7 @@ only, no TERMINATION) — same honesty discipline, different feature.
 """
 
 import ast
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -68,6 +76,7 @@ from .contract_verifier import _expr_to_z3, _OP_MAP
 
 _Z3_TIMEOUT_MS = 5000
 DEFAULT_MAX_UNROLL = 64
+MAX_POW_EXPONENT = 16
 
 
 class UnsupportedConstructError(ValueError):
@@ -76,12 +85,35 @@ class UnsupportedConstructError(ValueError):
     'equivalent' or 'not equivalent' — see module docstring."""
 
 
+class _PowExpander(ast.NodeTransformer):
+    """Rewrite `x ** k` with a literal integer k in [0, MAX_POW_EXPONENT] as a
+    product. Any other power is rejected rather than translated."""
+
+    def visit_BinOp(self, node: ast.BinOp) -> ast.expr:
+        self.generic_visit(node)
+        if not isinstance(node.op, ast.Pow):
+            return node
+        k = node.right
+        if not (isinstance(k, ast.Constant) and type(k.value) is int
+                and 0 <= k.value <= MAX_POW_EXPONENT):
+            raise UnsupportedConstructError(
+                f"'**' is only supported with an integer literal exponent from 0 to {MAX_POW_EXPONENT}"
+            )
+        if k.value == 0:
+            return ast.Constant(value=1)
+        result = node.left
+        for _ in range(k.value - 1):
+            result = ast.BinOp(left=result, op=ast.Mult(), right=copy.deepcopy(node.left))
+        return result
+
+
 def _expr_to_z3_safe(node: ast.expr, env: Dict[str, Any]) -> Any:
     """Wraps the reused contract_verifier._expr_to_z3 to convert its raw
     NotImplementedError (its convention for "unsupported node type", e.g.
     function calls, attribute access) into this module's
     UnsupportedConstructError, so every caller in this file can catch one
     consistent exception type instead of two."""
+    node = _PowExpander().visit(copy.deepcopy(node))
     for sub in ast.walk(node):
         # Z3's div/mod are Euclidean, so they differ from Python's // and %
         # whenever the divisor is negative or symbolic (Python: 7 % -2 == -1,
@@ -98,6 +130,15 @@ def _expr_to_z3_safe(node: ast.expr, env: Dict[str, Any]) -> Any:
         return _expr_to_z3(node, env)
     except NotImplementedError as e:
         raise UnsupportedConstructError(str(e))
+
+
+def _is_bool_arg(arg: ast.arg) -> bool:
+    """True if a parameter is annotated `bool` and so is a Z3 Boolean."""
+    return isinstance(arg.annotation, ast.Name) and arg.annotation.id == "bool"
+
+
+def _param_var(arg: ast.arg) -> Any:
+    return z3.Bool(arg.arg) if _is_bool_arg(arg) else z3.Int(arg.arg)
 
 
 @dataclass
@@ -180,13 +221,35 @@ def _exec_stmts(
                 raise UnsupportedConstructError("bare 'return' (no value)")
             return ("return", _expr_to_z3_safe(stmt.value, env))
 
-        if isinstance(stmt, ast.Assign):
-            if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
+        if isinstance(stmt, ast.AnnAssign):
+            if stmt.value is None:
+                continue  # a bare annotation binds nothing
+            if not isinstance(stmt.target, ast.Name):
                 raise UnsupportedConstructError(
-                    "assignment target must be a single simple name"
+                    "annotated assignment target must be a simple name"
                 )
-            env[stmt.targets[0].id] = _expr_to_z3_safe(stmt.value, env)
+            env[stmt.target.id] = _expr_to_z3_safe(stmt.value, env)
             continue
+
+        if isinstance(stmt, ast.Assign):
+            if all(isinstance(t, ast.Name) for t in stmt.targets):
+                value = _expr_to_z3_safe(stmt.value, env)
+                for t in stmt.targets:
+                    env[t.id] = value
+                continue
+            if (len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Tuple)
+                    and all(isinstance(t, ast.Name) for t in stmt.targets[0].elts)
+                    and isinstance(stmt.value, ast.Tuple)
+                    and len(stmt.value.elts) == len(stmt.targets[0].elts)):
+                # Evaluate every right-hand side before binding any name.
+                values = [_expr_to_z3_safe(v, env) for v in stmt.value.elts]
+                for t, v in zip(stmt.targets[0].elts, values):
+                    env[t.id] = v
+                continue
+            raise UnsupportedConstructError(
+                "assignment must bind simple names, or unpack a tuple of the same length"
+            )
 
         if isinstance(stmt, ast.AugAssign):
             if not isinstance(stmt.target, ast.Name):
@@ -323,7 +386,7 @@ def _function_to_symbolic(
     env = dict(shared_env)
     for arg in func_node.args.args:
         if arg.arg not in env:
-            env[arg.arg] = z3.Int(arg.arg)
+            env[arg.arg] = _param_var(arg)
     flow = _exec_stmts(list(func_node.body), env, max_unroll)
     if flow[0] != "return":
         raise UnsupportedConstructError(
@@ -397,7 +460,18 @@ def verify_function_equivalence(
                    f"{func_b} has {len(params_b)}",
         )
 
-    shared_vars = [z3.Int(f"_arg{i}") for i in range(len(params_a))]
+    bool_a = [_is_bool_arg(a) for a in node_a.args.args]
+    bool_b = [_is_bool_arg(b) for b in node_b.args.args]
+    if bool_a != bool_b:
+        return EquivalenceResult(
+            status="unsupported",
+            reason="parameter types differ: a parameter is annotated bool in one "
+                   "function but not the other",
+        )
+    shared_vars = [
+        z3.Bool(f"_arg{i}") if is_bool else z3.Int(f"_arg{i}")
+        for i, is_bool in enumerate(bool_a)
+    ]
     env_a = {name: var for name, var in zip(params_a, shared_vars)}
     env_b = {name: var for name, var in zip(params_b, shared_vars)}
 

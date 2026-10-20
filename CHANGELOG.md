@@ -17,6 +17,7 @@
 
 ### Added
 
+- `simplify_function` / `verify_function_equivalence` accept more of Python: annotated assignments (`x: int = e`), chained assignment (`a = b = e`), tuple unpacking with equal-length tuples (`a, b = b, a` swaps, with every right-hand side evaluated first), integer powers with a literal exponent from 0 to 16 (rewritten to products), and parameters annotated `bool` (Z3 Booleans, so `if flag:`, `not flag` and `and`/`or` translate). Float parameters stay unsupported because a real-valued equality need not hold for floats. Tests: `src/pyprover/tests/test_simplify_function.py::TestExpandedSubset`, which also renders the translated original and compares it with the source on a grid of inputs.
 - `src/code_orchestrator/tests/test_orchestrator.py`: analysis, invalid input, recommendation, coverage, reporting and checkpoint round trip. One known gap is marked `xfail(strict=True)`: checkpoints do not store `code_structure`
 - `simplify_function` returns `simplified_python`: a Python expression over the function's parameters, checked against the original on a grid of inputs in tests. `None` when the result cannot be rendered, and the Z3 string form is still returned
 - `src/pyprover/tests/test_simplify_function.py`: rendered Python matches the original on a grid, `//` and `%` soundness, renderer edge cases, and minimality
